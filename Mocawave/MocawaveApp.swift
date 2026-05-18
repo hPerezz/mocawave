@@ -20,7 +20,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func application(_ application: NSApplication, open urls: [URL]) {
         Task { @MainActor in
-            AudioPlayerViewModel.shared.handleExternalOpen(urls: urls)
+            AudioOpenCoordinator.shared.handleExternalOpen(urls: urls)
         }
     }
 }
