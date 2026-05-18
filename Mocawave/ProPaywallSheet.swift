@@ -135,21 +135,16 @@ struct ProPaywallSheet: View {
 
     private var pricingCard: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if let product = proStore.proProduct {
-                Text(product.displayName)
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundColor(.primary)
+            let product = proStore.paywallProduct
 
+            Text(product.displayName)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundColor(.primary)
+
+            if proStore.hasAppStoreProduct {
                 Text(product.displayPrice)
                     .font(.system(size: 22, weight: .bold, design: .monospaced))
                     .foregroundColor(.primary)
-
-                if !product.description.isEmpty {
-                    Text(product.description)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
             } else if proStore.isLoadingProducts {
                 HStack(spacing: 10) {
                     ProgressView()
@@ -159,8 +154,21 @@ struct ProPaywallSheet: View {
                         .foregroundColor(.secondary)
                 }
             } else {
-                Text(proStore.productLoadError ?? "Price unavailable right now.")
+                Text("One-time purchase")
+                    .font(.system(size: 22, weight: .bold, design: .monospaced))
+                    .foregroundColor(.primary)
+            }
+
+            if !product.description.isEmpty {
+                Text(product.description)
                     .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if !proStore.hasAppStoreProduct, !proStore.isLoadingProducts {
+                Text("App Store pricing is temporarily unavailable. You can still restore previous purchases.")
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -193,7 +201,7 @@ struct ProPaywallSheet: View {
                 }
             }
             .buttonStyle(.borderedProminent)
-            .disabled(isBusy || proStore.proProduct == nil)
+            .disabled(isBusy || !proStore.hasAppStoreProduct)
         }
     }
 

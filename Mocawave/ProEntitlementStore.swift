@@ -11,6 +11,15 @@ struct ProStoreProduct: Equatable {
     let displayPrice: String
 }
 
+struct ProStoreFallbackCatalog {
+    static let lifetime = ProStoreProduct(
+        id: defaultProProductID,
+        displayName: "Mocawave Pro (Lifetime)",
+        description: "Unlock RGB waveform, LUFS, dB peak, and quality analysis.",
+        displayPrice: ""
+    )
+}
+
 enum ProPurchaseOutcome: Equatable {
     case purchased
     case pending
@@ -37,14 +46,14 @@ protocol ProStoreBackend {
 }
 
 enum ProStoreRuntime {
-    static func defaultBackend(bundle: Bundle = .main) -> ProStoreBackend {
+    nonisolated static func defaultBackend(bundle: Bundle = .main) -> ProStoreBackend {
         if let reason = unavailableReason(bundle: bundle) {
             return UnavailableProStoreBackend(reason: reason)
         }
         return StoreKitProStoreBackend()
     }
 
-    static func unavailableReason(bundle: Bundle = .main) -> String? {
+    nonisolated static func unavailableReason(bundle: Bundle = .main) -> String? {
         let bundleIdentifier = bundle.bundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines)
         let packageType = bundle.object(forInfoDictionaryKey: "CFBundlePackageType") as? String
 
@@ -87,6 +96,8 @@ struct UnavailableProStoreBackend: ProStoreBackend, Sendable {
 }
 
 struct StoreKitProStoreBackend: ProStoreBackend, Sendable {
+    nonisolated init() {}
+
     var updates: AsyncStream<Void> {
         AsyncStream { continuation in
             let task = Task {
@@ -183,7 +194,7 @@ enum ProStoreError: LocalizedError, Equatable {
 @MainActor
 final class ProEntitlementStore: ObservableObject {
     static let shared = ProEntitlementStore(developmentOverrideEnabled: ProFeatures.developerOverrideEnabled)
-    nonisolated static let proProductID = defaultProProductID
+    nonisolated static let proProductID = "mocawave.pro.lifetime"
 
     @Published private(set) var hasPurchasedPro = false
     @Published private(set) var products: [ProStoreProduct] = []
@@ -198,12 +209,12 @@ final class ProEntitlementStore: ObservableObject {
     private var hasPreparedStore = false
 
     init(
-        backend: ProStoreBackend = ProStoreRuntime.defaultBackend(),
-        productIDs: Set<String> = [defaultProProductID],
+        backend: ProStoreBackend? = nil,
+        productIDs: Set<String>? = nil,
         developmentOverrideEnabled: Bool = false
     ) {
-        self.backend = backend
-        self.productIDs = productIDs
+        self.backend = backend ?? ProStoreRuntime.defaultBackend()
+        self.productIDs = productIDs ?? [Self.proProductID]
         self.developmentOverrideEnabled = developmentOverrideEnabled
         self.updatesTask = observeTransactionUpdates()
     }
@@ -218,6 +229,14 @@ final class ProEntitlementStore: ObservableObject {
 
     var proProduct: ProStoreProduct? {
         products.first { $0.id == Self.proProductID }
+    }
+
+    var paywallProduct: ProStoreProduct {
+        proProduct ?? ProStoreFallbackCatalog.lifetime
+    }
+
+    var hasAppStoreProduct: Bool {
+        proProduct != nil
     }
 
     func prepareIfNeeded() async {
