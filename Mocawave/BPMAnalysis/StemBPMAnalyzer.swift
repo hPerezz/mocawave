@@ -183,18 +183,25 @@ enum BPMAnalyzer2 {
                           window, 1, &windowed, 1, vDSP_Length(windowSize))
 
                 // Pack into split complex
-                var splitComplex = DSPSplitComplex(realp: &realp, imagp: &imagp)
-                windowed.withUnsafeBufferPointer { wPtr in
-                    vDSP_ctoz(UnsafePointer<DSPComplex>(OpaquePointer(wPtr.baseAddress!)),
-                              2, &splitComplex, 1, vDSP_Length(halfFFT))
-                }
-
-                // Forward FFT
-                vDSP_fft_zrip(fftSetup, &splitComplex, 1, log2n, FFTDirection(FFT_FORWARD))
-
-                // Magnitude spectrum
                 var magnitude = [Float](repeating: 0, count: halfFFT)
-                vDSP_zvmags(&splitComplex, 1, &magnitude, 1, vDSP_Length(halfFFT))
+                realp.withUnsafeMutableBufferPointer { realBuffer in
+                    imagp.withUnsafeMutableBufferPointer { imagBuffer in
+                        var splitComplex = DSPSplitComplex(
+                            realp: realBuffer.baseAddress!,
+                            imagp: imagBuffer.baseAddress!
+                        )
+                        windowed.withUnsafeBufferPointer { wPtr in
+                            vDSP_ctoz(UnsafePointer<DSPComplex>(OpaquePointer(wPtr.baseAddress!)),
+                                      2, &splitComplex, 1, vDSP_Length(halfFFT))
+                        }
+
+                        // Forward FFT
+                        vDSP_fft_zrip(fftSetup, &splitComplex, 1, log2n, FFTDirection(FFT_FORWARD))
+
+                        // Magnitude spectrum
+                        vDSP_zvmags(&splitComplex, 1, &magnitude, 1, vDSP_Length(halfFFT))
+                    }
+                }
 
                 // Square root to get actual magnitude (zvmags gives squared magnitude)
                 var sqrtMag = [Float](repeating: 0, count: halfFFT)
@@ -434,38 +441,44 @@ enum BPMAnalyzer2 {
         for i in 0..<copyCount { padded[i] = frame[i] }
 
         // Pack into split complex
+        var result = [Float](repeating: 0, count: paddedSize)
         var realp = [Float](repeating: 0, count: halfPadded)
         var imagp = [Float](repeating: 0, count: halfPadded)
-        var splitComplex = DSPSplitComplex(realp: &realp, imagp: &imagp)
 
-        padded.withUnsafeBufferPointer { ptr in
-            vDSP_ctoz(UnsafePointer<DSPComplex>(OpaquePointer(ptr.baseAddress!)),
-                       2, &splitComplex, 1, vDSP_Length(halfPadded))
-        }
+        realp.withUnsafeMutableBufferPointer { realBuffer in
+            imagp.withUnsafeMutableBufferPointer { imagBuffer in
+                var splitComplex = DSPSplitComplex(
+                    realp: realBuffer.baseAddress!,
+                    imagp: imagBuffer.baseAddress!
+                )
 
-        // Forward FFT
-        vDSP_fft_zrip(fftSetup, &splitComplex, 1, log2n, FFTDirection(FFT_FORWARD))
+                padded.withUnsafeBufferPointer { ptr in
+                    vDSP_ctoz(UnsafePointer<DSPComplex>(OpaquePointer(ptr.baseAddress!)),
+                               2, &splitComplex, 1, vDSP_Length(halfPadded))
+                }
 
-        // Compute |FFT(x)|^exponent
-        // magnitude = sqrt(real^2 + imag^2), then raise to exponent
-        for i in 0..<halfPadded {
-            let mag = sqrt(realp[i] * realp[i] + imagp[i] * imagp[i])
-            let scaled = pow(max(mag, 1e-20), exponent)
-            // Replace with real=scaled, imag=0 (magnitude-only, zero phase)
-            realp[i] = scaled
-            imagp[i] = 0
-        }
+                // Forward FFT
+                vDSP_fft_zrip(fftSetup, &splitComplex, 1, log2n, FFTDirection(FFT_FORWARD))
 
-        // Inverse FFT
-        splitComplex = DSPSplitComplex(realp: &realp, imagp: &imagp)
-        vDSP_fft_zrip(fftSetup, &splitComplex, 1, log2n, FFTDirection(FFT_INVERSE))
+                // Compute |FFT(x)|^exponent
+                // magnitude = sqrt(real^2 + imag^2), then raise to exponent
+                for i in 0..<halfPadded {
+                    let mag = sqrt(realBuffer[i] * realBuffer[i] + imagBuffer[i] * imagBuffer[i])
+                    let scaled = pow(max(mag, 1e-20), exponent)
+                    // Replace with real=scaled, imag=0 (magnitude-only, zero phase)
+                    realBuffer[i] = scaled
+                    imagBuffer[i] = 0
+                }
 
-        // Unpack result
-        var result = [Float](repeating: 0, count: paddedSize)
-        result.withUnsafeMutableBufferPointer { rPtr in
-            var sc = DSPSplitComplex(realp: &realp, imagp: &imagp)
-            vDSP_ztoc(&sc, 1, UnsafeMutablePointer<DSPComplex>(OpaquePointer(rPtr.baseAddress!)),
-                       2, vDSP_Length(halfPadded))
+                // Inverse FFT
+                vDSP_fft_zrip(fftSetup, &splitComplex, 1, log2n, FFTDirection(FFT_INVERSE))
+
+                // Unpack result
+                result.withUnsafeMutableBufferPointer { rPtr in
+                    vDSP_ztoc(&splitComplex, 1, UnsafeMutablePointer<DSPComplex>(OpaquePointer(rPtr.baseAddress!)),
+                               2, vDSP_Length(halfPadded))
+                }
+            }
         }
 
         // Normalize
@@ -635,4 +648,3 @@ enum BPMAnalyzer2 {
         return v + 1
     }
 }
-

@@ -87,29 +87,29 @@ enum KeyAnalyzer {
         let profiles: [[Float]]
     }
 
-    private static let targetSampleRate: Double = 22_050
-    private static let windowSize = 8_192
-    private static let hopSize = 2_048
-    private static let segmentDuration: Double = 12
-    private static let shortTrackFullAnalysisThreshold: Double = 18
-    private static let maxSegments = 6
-    private static let excludedEdgeFraction: Double = 0.05
-    private static let minFrequency: Float = 65
-    private static let maxFrequency: Float = 5_000
-    private static let minTonalFrames = 24
-    private static let minimumResolvedScore: Float = 0.5
-    private static let minimumRunnerUpMargin: Float = 0.03
-    private static let minimumRelativeMargin: Float = 0.015
-    private static let minimumConfidenceForAmbiguousResolution: Float = 0.47
-    private static let minimumWinnerShareForAmbiguousResolution: Float = 0.16
-    private static let silenceThreshold: Float = 1e-5
-    private static let maxPeakCountPerFrame = 24
-    private static let spectralFlatnessThreshold: Float = 0.55
-    private static let minimumTopThreePitchShare: Float = 0.45
+    nonisolated private static let targetSampleRate: Double = 22_050
+    nonisolated private static let windowSize = 8_192
+    nonisolated private static let hopSize = 2_048
+    nonisolated private static let segmentDuration: Double = 12
+    nonisolated private static let shortTrackFullAnalysisThreshold: Double = 18
+    nonisolated private static let maxSegments = 6
+    nonisolated private static let excludedEdgeFraction: Double = 0.05
+    nonisolated private static let minFrequency: Float = 65
+    nonisolated private static let maxFrequency: Float = 5_000
+    nonisolated private static let minTonalFrames = 24
+    nonisolated private static let minimumResolvedScore: Float = 0.5
+    nonisolated private static let minimumRunnerUpMargin: Float = 0.03
+    nonisolated private static let minimumRelativeMargin: Float = 0.015
+    nonisolated private static let minimumConfidenceForAmbiguousResolution: Float = 0.47
+    nonisolated private static let minimumWinnerShareForAmbiguousResolution: Float = 0.16
+    nonisolated private static let silenceThreshold: Float = 1e-5
+    nonisolated private static let maxPeakCountPerFrame = 24
+    nonisolated private static let spectralFlatnessThreshold: Float = 0.55
+    nonisolated private static let minimumTopThreePitchShare: Float = 0.45
 
-    private static let pitchClasses = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+    nonisolated private static let pitchClasses = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
-    private static let camelotMap: [[String]] = [
+    nonisolated private static let camelotMap: [[String]] = [
         ["5A", "8B"],
         ["12A", "3B"],
         ["7A", "10B"],
@@ -124,23 +124,23 @@ enum KeyAnalyzer {
         ["10A", "1B"],
     ]
 
-    private static let krumhanslMajorProfile: [Float] = [
+    nonisolated private static let krumhanslMajorProfile: [Float] = [
         6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88
     ]
 
-    private static let krumhanslMinorProfile: [Float] = [
+    nonisolated private static let krumhanslMinorProfile: [Float] = [
         6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17
     ]
 
-    private static let temperleyMajorProfile: [Float] = [
+    nonisolated private static let temperleyMajorProfile: [Float] = [
         0.748, 0.060, 0.488, 0.082, 0.670, 0.460, 0.096, 0.715, 0.104, 0.366, 0.057, 0.400
     ]
 
-    private static let temperleyMinorProfile: [Float] = [
+    nonisolated private static let temperleyMinorProfile: [Float] = [
         0.712, 0.084, 0.474, 0.618, 0.049, 0.460, 0.105, 0.747, 0.404, 0.067, 0.133, 0.330
     ]
 
-    private static let candidates: [KeyCandidate] = {
+    nonisolated private static let candidates: [KeyCandidate] = {
         var all: [KeyCandidate] = []
         for pitchClass in 0..<12 {
             all.append(KeyCandidate(
@@ -161,7 +161,7 @@ enum KeyAnalyzer {
         return all
     }()
 
-    private static let profileFamilies: [ProfileFamily] = [
+    nonisolated private static let profileFamilies: [ProfileFamily] = [
         ProfileFamily(
             name: "Krumhansl",
             profiles: buildProfileFamily(major: krumhanslMajorProfile, minor: krumhanslMinorProfile)
@@ -172,7 +172,7 @@ enum KeyAnalyzer {
         ),
     ]
 
-    static func analyze(url: URL, logger: ((String) -> Void)? = nil) throws -> KeyAnalysisResult {
+    nonisolated static func analyze(url: URL, logger: ((String) -> Void)? = nil) throws -> KeyAnalysisResult {
         logger?("[Key] Loading audio...")
 
         let file = try AVAudioFile(forReading: url)
@@ -261,7 +261,7 @@ enum KeyAnalyzer {
         return result
     }
 
-    private static func buildSegments(totalDuration: Double) -> [SegmentWindow] {
+    nonisolated private static func buildSegments(totalDuration: Double) -> [SegmentWindow] {
         guard totalDuration > 0 else { return [] }
 
         if totalDuration < shortTrackFullAnalysisThreshold {
@@ -291,7 +291,7 @@ enum KeyAnalyzer {
         }
     }
 
-    private static func readSegment(
+    nonisolated private static func readSegment(
         from file: AVAudioFile,
         startTime: Double,
         duration: Double,
@@ -359,7 +359,7 @@ enum KeyAnalyzer {
         return Array(UnsafeBufferPointer(start: channelData[0], count: frameCount))
     }
 
-    private static func analyzeSegment(
+    nonisolated private static func analyzeSegment(
         samples: [Float],
         fftSetup: FFTSetup,
         window: [Float],
@@ -516,7 +516,7 @@ enum KeyAnalyzer {
         )
     }
 
-    private static func detectPeaks(
+    nonisolated private static func detectPeaks(
         magnitudes: [Float],
         startBin: Int,
         endBin: Int
@@ -560,7 +560,7 @@ enum KeyAnalyzer {
         return peaks
     }
 
-    private static func buildHPCP(from peaks: [SpectralPeak], tuningOffset: Float) -> [Float] {
+    nonisolated private static func buildHPCP(from peaks: [SpectralPeak], tuningOffset: Float) -> [Float] {
         var chroma = [Float](repeating: 0, count: 12)
 
         for peak in peaks {
@@ -583,7 +583,7 @@ enum KeyAnalyzer {
         return normalizeToUnitSum(chroma)
     }
 
-    private static func scoreFrame(hpcp: [Float]) -> [Float] {
+    nonisolated private static func scoreFrame(hpcp: [Float]) -> [Float] {
         let normalizedHPCP = normalizeZeroMean(hpcp)
         let triadScores = candidates.map { candidate in
             let root = candidate.pitchClass
@@ -628,7 +628,7 @@ enum KeyAnalyzer {
         return combined
     }
 
-    private static func finalizeResult(
+    nonisolated private static func finalizeResult(
         combinedScores: [Float],
         combinedWinnerShares: [Float],
         totalWeight: Float,
@@ -725,7 +725,7 @@ enum KeyAnalyzer {
         )
     }
 
-    private static func confidenceScore(
+    nonisolated private static func confidenceScore(
         bestScore: Float,
         runnerUpMargin: Float,
         winnerShare: Float
@@ -735,7 +735,7 @@ enum KeyAnalyzer {
         return min(1, max(0, confidence))
     }
 
-    private static func buildProfileFamily(major: [Float], minor: [Float]) -> [[Float]] {
+    nonisolated private static func buildProfileFamily(major: [Float], minor: [Float]) -> [[Float]] {
         var profiles: [[Float]] = []
         profiles.reserveCapacity(24)
 
@@ -751,7 +751,7 @@ enum KeyAnalyzer {
         return profiles
     }
 
-    private static func normalizeZeroMean(_ values: [Float]) -> [Float] {
+    nonisolated private static func normalizeZeroMean(_ values: [Float]) -> [Float] {
         guard !values.isEmpty else { return values }
         let mean = values.reduce(0, +) / Float(values.count)
         let centered = values.map { $0 - mean }
@@ -762,13 +762,13 @@ enum KeyAnalyzer {
         return centered.map { $0 / norm }
     }
 
-    private static func normalizeToUnitSum(_ values: [Float]) -> [Float] {
+    nonisolated private static func normalizeToUnitSum(_ values: [Float]) -> [Float] {
         let total = values.reduce(0, +)
         guard total > 0 else { return values }
         return values.map { $0 / total }
     }
 
-    private static func circularShift(_ profile: [Float], by shift: Int) -> [Float] {
+    nonisolated private static func circularShift(_ profile: [Float], by shift: Int) -> [Float] {
         guard !profile.isEmpty else { return profile }
         var shifted = [Float](repeating: 0, count: profile.count)
         for index in profile.indices {
@@ -777,7 +777,7 @@ enum KeyAnalyzer {
         return shifted
     }
 
-    private static func spectralFlatness(
+    nonisolated private static func spectralFlatness(
         magnitudes: [Float],
         startBin: Int,
         endBin: Int
@@ -794,13 +794,13 @@ enum KeyAnalyzer {
         return geometricMean / arithmeticMean
     }
 
-    private static func tuningOffsetSemitones(x: Float, y: Float) -> Float {
+    nonisolated private static func tuningOffsetSemitones(x: Float, y: Float) -> Float {
         let magnitude = sqrt(x * x + y * y)
         guard magnitude > 1e-4 else { return 0 }
         return atan2(y, x) / (2 * .pi)
     }
 
-    private static func rmsFloor(rmsValues: [Float]) -> Float {
+    nonisolated private static func rmsFloor(rmsValues: [Float]) -> Float {
         let sorted = rmsValues.sorted()
         guard let maxRMS = sorted.last else { return silenceThreshold }
         let percentileIndex = Int(Float(max(0, sorted.count - 1)) * 0.3)
@@ -808,14 +808,14 @@ enum KeyAnalyzer {
         return max(silenceThreshold, min(maxRMS * 0.35, percentile * 0.75))
     }
 
-    private static func topThreePitchShare(_ chroma: [Float]) -> Float? {
+    nonisolated private static func topThreePitchShare(_ chroma: [Float]) -> Float? {
         let total = chroma.reduce(0, +)
         guard total > 0 else { return nil }
         let topThree = chroma.sorted(by: >).prefix(3).reduce(0, +)
         return topThree / total
     }
 
-    private static func minMaxNormalize(_ values: [Float]) -> [Float] {
+    nonisolated private static func minMaxNormalize(_ values: [Float]) -> [Float] {
         guard let minimum = values.min(), let maximum = values.max(), maximum > minimum else {
             return [Float](repeating: 0, count: values.count)
         }
@@ -823,7 +823,7 @@ enum KeyAnalyzer {
         return values.map { ($0 - minimum) / span }
     }
 
-    private static func argmax(_ values: [Float]) -> Int? {
+    nonisolated private static func argmax(_ values: [Float]) -> Int? {
         guard !values.isEmpty else { return nil }
         var bestIndex = 0
         var bestValue = values[0]
@@ -834,7 +834,7 @@ enum KeyAnalyzer {
         return bestIndex
     }
 
-    private static func relativeKeyIndex(for candidateIndex: Int) -> Int {
+    nonisolated private static func relativeKeyIndex(for candidateIndex: Int) -> Int {
         let candidate = candidates[candidateIndex]
         if candidate.isMajor {
             return 12 + ((candidate.pitchClass + 9) % 12)
@@ -842,12 +842,12 @@ enum KeyAnalyzer {
         return (candidate.pitchClass + 3) % 12
     }
 
-    private static func positiveModulo(_ value: Float, modulus: Float) -> Float {
+    nonisolated private static func positiveModulo(_ value: Float, modulus: Float) -> Float {
         let result = value.truncatingRemainder(dividingBy: modulus)
         return result >= 0 ? result : result + modulus
     }
 
-    private static func circularDistance(value: Float, target: Float, modulus: Float) -> Float {
+    nonisolated private static func circularDistance(value: Float, target: Float, modulus: Float) -> Float {
         let diff = abs(value - target)
         return min(diff, modulus - diff)
     }

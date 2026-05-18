@@ -17,27 +17,27 @@ enum BPMAnalyzer4 {
     // MARK: - Algorithm Parameters (Table 1 in paper)
 
     /// Audio is resampled to this rate before all processing.
-    private static let targetSR: Float = 8000
+    nonisolated private static let targetSR: Float = 8000
     /// STFT window length in samples — 32 ms at 8 kHz.
-    private static let windowSize = 256
+    nonisolated private static let windowSize = 256
     /// STFT hop length in samples — 4 ms, giving a 250 Hz frame rate.
-    private static let hopSize = 32
+    nonisolated private static let hopSize = 32
     /// Number of Mel-frequency bands.
-    private static let numMelBands = 40
+    nonisolated private static let numMelBands = 40
     /// Onset-envelope frame rate (targetSR / hopSize).
-    private static let frameRate: Float = 250.0
+    nonisolated private static let frameRate: Float = 250.0
     /// Centre of perceptual tempo-bias window (0.5 s ≡ 120 BPM).
-    private static let tau0: Float = 0.5
+    nonisolated private static let tau0: Float = 0.5
     /// Width of tempo-bias window in octaves.
-    private static let sigmaTau: Float = 0.9
+    nonisolated private static let sigmaTau: Float = 0.9
     /// DP balance parameter between onset strength and tempo consistency.
-    private static let alpha: Float = 680.0
+    nonisolated private static let alpha: Float = 680.0
     /// Minimum BPM considered during tempo search.
-    private static let minBPM: Float = 30
+    nonisolated private static let minBPM: Float = 30
     /// Maximum BPM considered during tempo search.
-    private static let maxBPM: Float = 300
+    nonisolated private static let maxBPM: Float = 300
     /// Maximum audio duration analysed (seconds).
-    private static let maxSeconds: Double = 60
+    nonisolated private static let maxSeconds: Double = 60
 
     // MARK: - Public API
 
@@ -45,7 +45,7 @@ enum BPMAnalyzer4 {
     ///
     /// The optional `logger` closure receives human-readable progress messages
     /// (same convention as `BPMAnalyzer`).
-    static func analyze(url: URL, logger: ((String) -> Void)? = nil) throws -> Int {
+    nonisolated static func analyze(url: URL, logger: ((String) -> Void)? = nil) throws -> Int {
         logger?("[Ellis DP] Loading audio…")
         let samples = try loadAndResample(url: url, logger: logger)
         guard samples.count > windowSize * 4 else {
@@ -87,7 +87,7 @@ enum BPMAnalyzer4 {
 
     // MARK: - Audio Loading & Resampling
 
-    private static func loadAndResample(url: URL,
+    nonisolated private static func loadAndResample(url: URL,
                                         logger: ((String) -> Void)?) throws -> [Float] {
         let file = try AVAudioFile(forReading: url)
         let fmt  = file.processingFormat
@@ -141,7 +141,7 @@ enum BPMAnalyzer4 {
 
     // MARK: - Stage 1: Onset Strength Envelope
 
-    private static func computeOnsetEnvelope(_ samples: [Float],
+    nonisolated private static func computeOnsetEnvelope(_ samples: [Float],
                                              logger: ((String) -> Void)?) -> [Float] {
         let half    = windowSize / 2                          // 128 FFT bins
         let nFrames = max(0, (samples.count - windowSize) / hopSize + 1)
@@ -237,16 +237,16 @@ enum BPMAnalyzer4 {
 
     // MARK: - Mel Filterbank
 
-    private static func hzToMel(_ hz: Float) -> Float {
+    nonisolated private static func hzToMel(_ hz: Float) -> Float {
         2595.0 * log10(1.0 + hz / 700.0)
     }
 
-    private static func melToHz(_ mel: Float) -> Float {
+    nonisolated private static func melToHz(_ mel: Float) -> Float {
         700.0 * (powf(10.0, mel / 2595.0) - 1.0)
     }
 
     /// Build a bank of `bands` triangular Mel-spaced filters over `fftSize/2` bins.
-    private static func melFilterbank(bands: Int, fftSize: Int, sr: Float) -> [[Float]] {
+    nonisolated private static func melFilterbank(bands: Int, fftSize: Int, sr: Float) -> [[Float]] {
         let nBins = fftSize / 2
         let hiMel = hzToMel(sr / 2.0)
         let nPts  = bands + 2                                           // filter edge count
@@ -277,7 +277,7 @@ enum BPMAnalyzer4 {
 
     // MARK: - Stage 2: Tempo Estimation
 
-    private static func estimateTempo(
+    nonisolated private static func estimateTempo(
         _ env: [Float],
         logger: ((String) -> Void)?
     ) -> (primaryPeriod: Float, secondaryPeriod: Float?, weight: Float) {
@@ -372,7 +372,7 @@ enum BPMAnalyzer4 {
     /// Find the optimal beat sequence that maximises
     ///   C({t_i}) = Σ O(t_i) + α · Σ F(t_i − t_{i−1}, τ_p)
     /// where  F(Δt, τ) = −(ln(Δt/τ))².
-    private static func beatTrack(_ env: [Float],
+    nonisolated private static func beatTrack(_ env: [Float],
                                   period: Float,
                                   logger: ((String) -> Void)?) -> [Int] {
         let N = env.count
@@ -440,7 +440,7 @@ enum BPMAnalyzer4 {
     // MARK: - BPM from Beat Positions
 
     /// Derive BPM from the median inter-beat interval.
-    private static func bpmFromBeats(_ beats: [Int],
+    nonisolated private static func bpmFromBeats(_ beats: [Int],
                                      fallback: Float,
                                      logger: ((String) -> Void)?) -> Int {
         guard beats.count >= 2 else { return foldBPM(Int(fallback.rounded())) }
@@ -471,7 +471,7 @@ enum BPMAnalyzer4 {
 
     /// Fold the BPM into a perceptually reasonable range [40, 240]
     /// by doubling or halving.
-    private static func foldBPM(_ raw: Int) -> Int {
+    nonisolated private static func foldBPM(_ raw: Int) -> Int {
         guard raw > 0 else { return 0 }
         var b = raw
         while b < 40  { b *= 2 }
@@ -482,7 +482,7 @@ enum BPMAnalyzer4 {
     // MARK: - DSP Utilities
 
     /// First-order RC high-pass filter.
-    private static func highPass(_ sig: [Float], sr: Float, cutoff: Float) -> [Float] {
+    nonisolated private static func highPass(_ sig: [Float], sr: Float, cutoff: Float) -> [Float] {
         guard sig.count > 1 else { return sig }
         let rc = 1.0 / (2.0 * Float.pi * cutoff)
         let dt = 1.0 / sr
@@ -496,7 +496,7 @@ enum BPMAnalyzer4 {
     }
 
     /// Gaussian smoothing with edge-aware weight normalisation.
-    private static func gaussianSmooth(_ sig: [Float], sigma: Float) -> [Float] {
+    nonisolated private static func gaussianSmooth(_ sig: [Float], sigma: Float) -> [Float] {
         let radius = Int(ceil(sigma * 3))
         let kLen   = 2 * radius + 1
         guard sig.count > kLen else { return sig }
@@ -528,4 +528,3 @@ enum BPMAnalyzer4 {
         return out
     }
 }
-

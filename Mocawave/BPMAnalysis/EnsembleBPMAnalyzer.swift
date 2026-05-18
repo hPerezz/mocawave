@@ -327,45 +327,53 @@ enum BPMAnalyzer {
         
         var realp = [Float](repeating: 0, count: fftSize / 2)
         var imagp = [Float](repeating: 0, count: fftSize / 2)
-        var splitComplex = DSPSplitComplex(realp: &realp, imagp: &imagp)
         
         // Window function (Hanning)
         var window = [Float](repeating: 0, count: fftSize)
         vDSP_hann_window(&window, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
         
-        samples.withUnsafeBufferPointer { samplesPtr in
-            for frame in 0..<numFrames {
-                let startIdx = frame * hopSize
-                guard startIdx + fftSize <= samples.count else { break }
-                
-                // Apply window and copy to FFT buffer
-                var windowed = [Float](repeating: 0, count: fftSize)
-                vDSP_vmul(samplesPtr.baseAddress! + startIdx, 1, window, 1, &windowed, 1, vDSP_Length(fftSize))
-                
-                // Copy to split complex format
-                windowed.withUnsafeBufferPointer { windowedPtr in
-                    vDSP_ctoz(UnsafePointer<DSPComplex>(OpaquePointer(windowedPtr.baseAddress!)), 2,
-                              &splitComplex, 1, vDSP_Length(fftSize / 2))
-                }
-                
-                // Perform FFT
-                vDSP_fft_zrip(fftSetup, &splitComplex, 1, log2n, FFTDirection(FFT_FORWARD))
-                
-                // Compute magnitude spectrum
-                var magnitude = [Float](repeating: 0, count: fftSize / 2)
-                vDSP_zvmags(&splitComplex, 1, &magnitude, 1, vDSP_Length(fftSize / 2))
-                
-                // Compute spectral flux: sum of positive differences
-                var flux: Float = 0
-                for i in 0..<magnitude.count {
-                    let diff = magnitude[i] - prevMagnitude[i]
-                    if diff > 0 {
-                        flux += diff
+        realp.withUnsafeMutableBufferPointer { realBuffer in
+            imagp.withUnsafeMutableBufferPointer { imagBuffer in
+                var splitComplex = DSPSplitComplex(
+                    realp: realBuffer.baseAddress!,
+                    imagp: imagBuffer.baseAddress!
+                )
+
+                samples.withUnsafeBufferPointer { samplesPtr in
+                    for frame in 0..<numFrames {
+                        let startIdx = frame * hopSize
+                        guard startIdx + fftSize <= samples.count else { break }
+
+                        // Apply window and copy to FFT buffer
+                        var windowed = [Float](repeating: 0, count: fftSize)
+                        vDSP_vmul(samplesPtr.baseAddress! + startIdx, 1, window, 1, &windowed, 1, vDSP_Length(fftSize))
+
+                        // Copy to split complex format
+                        windowed.withUnsafeBufferPointer { windowedPtr in
+                            vDSP_ctoz(UnsafePointer<DSPComplex>(OpaquePointer(windowedPtr.baseAddress!)), 2,
+                                      &splitComplex, 1, vDSP_Length(fftSize / 2))
+                        }
+
+                        // Perform FFT
+                        vDSP_fft_zrip(fftSetup, &splitComplex, 1, log2n, FFTDirection(FFT_FORWARD))
+
+                        // Compute magnitude spectrum
+                        var magnitude = [Float](repeating: 0, count: fftSize / 2)
+                        vDSP_zvmags(&splitComplex, 1, &magnitude, 1, vDSP_Length(fftSize / 2))
+
+                        // Compute spectral flux: sum of positive differences
+                        var flux: Float = 0
+                        for i in 0..<magnitude.count {
+                            let diff = magnitude[i] - prevMagnitude[i]
+                            if diff > 0 {
+                                flux += diff
+                            }
+                        }
+
+                        spectralFlux[frame] = flux
+                        prevMagnitude = magnitude
                     }
                 }
-                
-                spectralFlux[frame] = flux
-                prevMagnitude = magnitude
             }
         }
         
@@ -398,11 +406,13 @@ enum BPMAnalyzer {
         // Compute first derivative (energy change) using vectorized operations
         var diff = [Float](repeating: 0, count: samples.count)
 
-        samples.withUnsafeBufferPointer { samplesPtr in
-            vDSP_vsub(samplesPtr.baseAddress!, 1,
-                      samplesPtr.baseAddress! + 1, 1,
-                      &diff + 1, 1,
-                      vDSP_Length(samples.count - 1))
+        diff.withUnsafeMutableBufferPointer { diffPtr in
+            samples.withUnsafeBufferPointer { samplesPtr in
+                vDSP_vsub(samplesPtr.baseAddress!, 1,
+                          samplesPtr.baseAddress! + 1, 1,
+                          diffPtr.baseAddress!.advanced(by: 1), 1,
+                          vDSP_Length(samples.count - 1))
+            }
         }
 
         // Half-wave rectification: keep only positive values
@@ -664,35 +674,43 @@ enum BPMAnalyzer {
         
         var realp = [Float](repeating: 0, count: windowSize / 2)
         var imagp = [Float](repeating: 0, count: windowSize / 2)
-        var splitComplex = DSPSplitComplex(realp: &realp, imagp: &imagp)
         
         // Hanning window
         var window = [Float](repeating: 0, count: windowSize)
         vDSP_hann_window(&window, vDSP_Length(windowSize), Int32(vDSP_HANN_NORM))
         
-        samples.withUnsafeBufferPointer { samplesPtr in
-            for win in 0..<numWindows {
-                let startIdx = win * hopSize
-                guard startIdx + windowSize <= samples.count else { break }
-                
-                // Apply window
-                var windowed = [Float](repeating: 0, count: windowSize)
-                vDSP_vmul(samplesPtr.baseAddress! + startIdx, 1, window, 1, &windowed, 1, vDSP_Length(windowSize))
-                
-                // Copy to split complex
-                windowed.withUnsafeBufferPointer { windowedPtr in
-                    vDSP_ctoz(UnsafePointer<DSPComplex>(OpaquePointer(windowedPtr.baseAddress!)), 2,
-                              &splitComplex, 1, vDSP_Length(windowSize / 2))
+        realp.withUnsafeMutableBufferPointer { realBuffer in
+            imagp.withUnsafeMutableBufferPointer { imagBuffer in
+                var splitComplex = DSPSplitComplex(
+                    realp: realBuffer.baseAddress!,
+                    imagp: imagBuffer.baseAddress!
+                )
+
+                samples.withUnsafeBufferPointer { samplesPtr in
+                    for win in 0..<numWindows {
+                        let startIdx = win * hopSize
+                        guard startIdx + windowSize <= samples.count else { break }
+
+                        // Apply window
+                        var windowed = [Float](repeating: 0, count: windowSize)
+                        vDSP_vmul(samplesPtr.baseAddress! + startIdx, 1, window, 1, &windowed, 1, vDSP_Length(windowSize))
+
+                        // Copy to split complex
+                        windowed.withUnsafeBufferPointer { windowedPtr in
+                            vDSP_ctoz(UnsafePointer<DSPComplex>(OpaquePointer(windowedPtr.baseAddress!)), 2,
+                                      &splitComplex, 1, vDSP_Length(windowSize / 2))
+                        }
+
+                        // FFT
+                        vDSP_fft_zrip(fftSetup, &splitComplex, 1, log2n, FFTDirection(FFT_FORWARD))
+
+                        // Accumulate magnitude
+                        var magnitude = [Float](repeating: 0, count: windowSize / 2)
+                        vDSP_zvmags(&splitComplex, 1, &magnitude, 1, vDSP_Length(windowSize / 2))
+
+                        vDSP_vadd(magnitudeSum, 1, magnitude, 1, &magnitudeSum, 1, vDSP_Length(windowSize / 2))
+                    }
                 }
-                
-                // FFT
-                vDSP_fft_zrip(fftSetup, &splitComplex, 1, log2n, FFTDirection(FFT_FORWARD))
-                
-                // Accumulate magnitude
-                var magnitude = [Float](repeating: 0, count: windowSize / 2)
-                vDSP_zvmags(&splitComplex, 1, &magnitude, 1, vDSP_Length(windowSize / 2))
-                
-                vDSP_vadd(magnitudeSum, 1, magnitude, 1, &magnitudeSum, 1, vDSP_Length(windowSize / 2))
             }
         }
         
@@ -938,4 +956,3 @@ enum BPMAnalyzer {
         return Int(bpm.rounded())
     }
 }
-
