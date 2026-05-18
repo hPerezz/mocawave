@@ -89,7 +89,7 @@ The high-level flow is:
 | --- | --- |
 | `ProEntitlementStore.swift` | StoreKit-facing entitlement model. Fetches products, observes transaction updates, checks current entitlements, purchases/restores Pro, and exposes UI-ready purchase state. |
 | `ProFeatures.swift` | Central Pro feature switch. Currently enables a development override through `developmentOverrideFlag`. |
-| `MocawavePro.storekit` | Local StoreKit configuration for testing the non-consumable Pro lifetime purchase. |
+| `Mocawave Pro.storekit` | Local StoreKit configuration for testing the non-consumable Pro lifetime purchase. This is the file referenced by the shared Xcode scheme. |
 
 ### Assets and Tests
 
