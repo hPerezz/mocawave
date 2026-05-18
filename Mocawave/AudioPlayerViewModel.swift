@@ -6,7 +6,6 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class AudioPlayerViewModel: ObservableObject {
-    static let shared = AudioPlayerViewModel()
     private static let coloredWaveformPreferenceKey = "showColoredWaveform"
 
     private struct PlaybackTelemetry: Equatable {
@@ -63,16 +62,19 @@ final class AudioPlayerViewModel: ObservableObject {
     private var debugLogFlushTask: Task<Void, Never>?
     private let preferences: UserDefaults
     private let proFeaturesProvider: () -> Bool
+    private let waveformAnalysisCoordinator: any WaveformAnalysisScheduling
     /// Incremented on every play() call; completion handlers compare against this
     /// to detect stale callbacks from previous scheduleSegment calls.
     private var playGeneration: UInt64 = 0
 
     init(
         userDefaults: UserDefaults = .standard,
-        proFeaturesProvider: (() -> Bool)? = nil
+        proFeaturesProvider: (() -> Bool)? = nil,
+        waveformAnalysisCoordinator: (any WaveformAnalysisScheduling)? = nil
     ) {
         self.preferences = userDefaults
         self.proFeaturesProvider = proFeaturesProvider ?? { ProEntitlementStore.shared.effectiveProAccess }
+        self.waveformAnalysisCoordinator = waveformAnalysisCoordinator ?? WaveformAnalysisCoordinator.shared
 
         let savedPreference = userDefaults.bool(forKey: Self.coloredWaveformPreferenceKey)
         _showColoredWaveform = Published(initialValue: savedPreference && self.proFeaturesProvider())
@@ -170,14 +172,6 @@ final class AudioPlayerViewModel: ObservableObject {
         Self.formatTime(duration)
     }
 
-    func handleExternalOpen(urls: [URL]) {
-        guard let url = urls.reversed().first(where: { isSupported(url: $0) }) ?? urls.last else {
-            return
-        }
-
-        open(url: url)
-    }
-
     @discardableResult
     func open(url: URL) -> Bool {
         errorMessage = nil
@@ -186,6 +180,7 @@ final class AudioPlayerViewModel: ObservableObject {
             return false
         }
 
+        let previousURL = currentURL
         let startedAccessingSecurityScopedResource = url.startAccessingSecurityScopedResource()
         stopPlayback()
         stopEngine()
@@ -195,6 +190,9 @@ final class AudioPlayerViewModel: ObservableObject {
         spectrogramTask?.cancel()
         coloredWaveformTask?.cancel()
         qualityAnalysisTask?.cancel()
+        if previousURL != url {
+            cancelWaveformFamily(for: previousURL)
+        }
         waveformSamples = []
         coloredWaveformData = nil
         spectrogramImage = nil
@@ -234,22 +232,24 @@ final class AudioPlayerViewModel: ObservableObject {
                 url.stopAccessingSecurityScopedResource()
             }
             releaseSecurityScopedResource()
-            addDebugLog("File open error: \(error)")
-            errorMessage = "Failed to open audio file."
+            let diagnostic = diagnosticDescription(for: error)
+            addDebugLog("File open error: \(diagnostic)")
+            errorMessage = "Failed to open audio file: \(diagnostic)"
             audioFile = nil
             audioEngine = nil
             playerNode = nil
             lufsMeter = nil
             duration = 0
+            currentURL = nil
             resetPlaybackTelemetry()
             return false
         }
 
+        play()
         loadOrAnalyze(url: url)
         if showSpectrogram {
             analyzeAndRenderSpectrogram(for: url)
         }
-        play()
         return true
     }
 
@@ -273,9 +273,12 @@ final class AudioPlayerViewModel: ObservableObject {
         let totalFrames = AVAudioFrameCount(audioFile.length - startFrame)
         guard totalFrames > 0 else { return }
 
-        playerNode.scheduleSegment(audioFile, startingFrame: startFrame, frameCount: totalFrames, at: nil) { [weak self] in
+        let handlePlaybackCompletion: @MainActor @Sendable () -> Void = { [weak self] in
+            self?.handlePlaybackCompletion(generation: expectedGeneration)
+        }
+        playerNode.scheduleSegment(audioFile, startingFrame: startFrame, frameCount: totalFrames, at: nil) {
             Task { @MainActor in
-                self?.handlePlaybackCompletion(generation: expectedGeneration)
+                handlePlaybackCompletion()
             }
         }
         playerNode.play()
@@ -356,6 +359,12 @@ final class AudioPlayerViewModel: ObservableObject {
     }
 
     deinit {
+        if let currentURL {
+            let waveformAnalysisCoordinator = waveformAnalysisCoordinator
+            Task {
+                await waveformAnalysisCoordinator.cancelAll(for: currentURL)
+            }
+        }
         analysisTask?.cancel()
         bpmAnalysisTask?.cancel()
         keyAnalysisTask?.cancel()
@@ -388,6 +397,7 @@ final class AudioPlayerViewModel: ObservableObject {
 
     private func extractBPM(from url: URL) {
         let asset = AVURLAsset(url: url)
+        let capturedURL = url
         Task {
             let metadata = try? await asset.load(.metadata)
             guard let metadata else { return }
@@ -395,6 +405,7 @@ final class AudioPlayerViewModel: ObservableObject {
             for item in metadata {
                 if let key = item.commonKey?.rawValue, key == "tempo" {
                     if let value = try? await item.load(.value) as? NSNumber {
+                        guard self.currentURL == capturedURL else { return }
                         self.bpm = value.intValue
                         return
                     }
@@ -404,9 +415,11 @@ final class AudioPlayerViewModel: ObservableObject {
                        identifier == .iTunesMetadataBeatsPerMin {
                         if let value = try? await item.load(.value) {
                             if let number = value as? NSNumber {
+                                guard self.currentURL == capturedURL else { return }
                                 self.bpm = number.intValue
                                 return
                             } else if let string = value as? String, let parsed = Int(string) {
+                                guard self.currentURL == capturedURL else { return }
                                 self.bpm = parsed
                                 return
                             }
@@ -432,6 +445,63 @@ final class AudioPlayerViewModel: ObservableObject {
         debugLogFlushTask = nil
         pendingDebugLogEntries.removeAll()
         debugLog.removeAll()
+    }
+
+    private func diagnosticDescription(for error: Error) -> String {
+        if let localizedError = error as? LocalizedError,
+           let description = localizedError.errorDescription,
+           !description.isEmpty {
+            return description
+        }
+
+        let nsError = error as NSError
+        var components = ["[\(nsError.domain) \(nsError.code)] \(nsError.localizedDescription)"]
+
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+            components.append("underlying=[\(underlying.domain) \(underlying.code)] \(underlying.localizedDescription)")
+        }
+        if let failureReason = nsError.userInfo[NSLocalizedFailureReasonErrorKey] as? String,
+           !failureReason.isEmpty {
+            components.append("reason=\(failureReason)")
+        }
+        if let filePath = nsError.userInfo[NSFilePathErrorKey] as? String,
+           !filePath.isEmpty {
+            components.append("path=\(filePath)")
+        }
+
+        return components.joined(separator: " | ")
+    }
+
+    private func cancelWaveformFamily(for url: URL?) {
+        guard let url else { return }
+        let waveformAnalysisCoordinator = waveformAnalysisCoordinator
+        Task {
+            await waveformAnalysisCoordinator.cancelAll(for: url)
+        }
+    }
+
+    private func cancelColoredWaveformAnalysis(for url: URL?) {
+        guard let url else { return }
+        let waveformAnalysisCoordinator = waveformAnalysisCoordinator
+        Task {
+            await waveformAnalysisCoordinator.cancelColoredWaveform(for: url)
+        }
+    }
+
+    private func cancelSpectrogramAnalysis(for url: URL?) {
+        guard let url else { return }
+        let waveformAnalysisCoordinator = waveformAnalysisCoordinator
+        Task {
+            await waveformAnalysisCoordinator.cancelSpectrogram(for: url)
+        }
+    }
+
+    private func cancelQualityAnalysis(for url: URL?) {
+        guard let url else { return }
+        let waveformAnalysisCoordinator = waveformAnalysisCoordinator
+        Task {
+            await waveformAnalysisCoordinator.cancelQuality(for: url)
+        }
     }
 
     private func scheduleDebugLogFlushIfNeeded() {
@@ -486,6 +556,7 @@ final class AudioPlayerViewModel: ObservableObject {
         }
         isAnalyzingColoredWaveform = false
         coloredWaveformTask?.cancel()
+        cancelColoredWaveformAnalysis(for: currentURL)
     }
 
     func toggleColoredWaveform() {
@@ -516,6 +587,7 @@ final class AudioPlayerViewModel: ObservableObject {
         } else {
             isAnalyzingColoredWaveform = false
             coloredWaveformTask?.cancel()
+            cancelColoredWaveformAnalysis(for: currentURL)
         }
     }
 
@@ -523,6 +595,10 @@ final class AudioPlayerViewModel: ObservableObject {
         showSpectrogram.toggle()
         if showSpectrogram, spectrogramImage == nil, !isAnalyzingSpectrogram, let url = currentURL {
             analyzeAndRenderSpectrogram(for: url)
+        } else if !showSpectrogram {
+            spectrogramTask?.cancel()
+            isAnalyzingSpectrogram = false
+            cancelSpectrogramAnalysis(for: currentURL)
         }
     }
 
@@ -549,6 +625,7 @@ final class AudioPlayerViewModel: ObservableObject {
                 disableColoredWaveformPreference(persistPreference: false)
             }
             qualityAnalysisTask?.cancel()
+            cancelQualityAnalysis(for: currentURL)
             audioQuality = nil
             isAnalyzingQuality = false
             disableRealtimeMeters()
@@ -557,23 +634,27 @@ final class AudioPlayerViewModel: ObservableObject {
 
     private func analyzeAndRenderSpectrogram(for url: URL) {
         let capturedURL = url
+        spectrogramTask?.cancel()
         isAnalyzingSpectrogram = true
         addDebugLog("Spectrogram analysis started for: \(url.lastPathComponent)")
         spectrogramTask = Task { [weak self] in
             defer {
                 self?.isAnalyzingSpectrogram = false
+                self?.spectrogramTask = nil
             }
             guard let self else { return }
             do {
-                let data = try await Task.detached(priority: .userInitiated) {
-                    try WaveformAnalyzer.analyzeSpectrogram(url: url)
-                }.value
-                guard !Task.isCancelled, self.currentURL == capturedURL else { return }
+                let data = try await self.waveformAnalysisCoordinator.spectrogram(
+                    url: url,
+                    targetColumns: 2000,
+                    freqBins: 128
+                )
+                guard !Task.isCancelled, self.currentURL == capturedURL, self.showSpectrogram else { return }
 
-                let image = await Task.detached(priority: .userInitiated) {
+                let image = await Task.detached(priority: .utility) {
                     Self.renderSpectrogramImage(data: data)
                 }.value
-                guard !Task.isCancelled, self.currentURL == capturedURL else { return }
+                guard !Task.isCancelled, self.currentURL == capturedURL, self.showSpectrogram else { return }
 
                 self.spectrogramImage = image
                 self.addDebugLog("Spectrogram rendered for: \(url.lastPathComponent)")
@@ -581,7 +662,7 @@ final class AudioPlayerViewModel: ObservableObject {
                 return
             } catch {
                 guard !Task.isCancelled, self.currentURL == capturedURL else { return }
-                self.addDebugLog("Spectrogram error: \(error)")
+                self.addDebugLog("Spectrogram error: \(self.diagnosticDescription(for: error))")
             }
         }
     }
@@ -669,13 +750,15 @@ final class AudioPlayerViewModel: ObservableObject {
         coloredWaveformTask = Task { [weak self] in
             defer {
                 self?.isAnalyzingColoredWaveform = false
+                self?.coloredWaveformTask = nil
             }
             guard let self else { return }
             do {
-                let data = try await Task.detached(priority: .userInitiated) {
-                    try WaveformAnalyzer.analyzeColoredWaveform(url: url)
-                }.value
-                guard !Task.isCancelled, self.currentURL == capturedURL else { return }
+                let data = try await self.waveformAnalysisCoordinator.coloredWaveform(
+                    url: url,
+                    targetColumns: 2000
+                )
+                guard !Task.isCancelled, self.currentURL == capturedURL, self.prefersColoredWaveform else { return }
 
                 self.coloredWaveformData = data
                 self.addDebugLog("RGB waveform analysis complete: \(url.lastPathComponent)")
@@ -694,8 +777,8 @@ final class AudioPlayerViewModel: ObservableObject {
             } catch is CancellationError {
                 return
             } catch {
-                guard !Task.isCancelled, self.currentURL == capturedURL else { return }
-                self.addDebugLog("RGB waveform error: \(error)")
+                guard !Task.isCancelled, self.currentURL == capturedURL, self.prefersColoredWaveform else { return }
+                self.addDebugLog("RGB waveform error: \(self.diagnosticDescription(for: error))")
             }
         }
     }
@@ -760,10 +843,17 @@ final class AudioPlayerViewModel: ObservableObject {
     private func loadOrAnalyze(url: URL) {
         Task { [weak self] in
             guard let self else { return }
+            let cached = await AudioCache.shared.getCached(for: url)
+            guard self.currentURL == url else { return }
 
-            if let cached = await AudioCache.shared.getCached(for: url) {
+            if let cached {
                 self.addDebugLog("Cache hit for: \(url.lastPathComponent)")
-                self.waveformSamples = cached.waveformSamples
+                let isWaveformMissing = cached.waveformSamples.isEmpty
+                if isWaveformMissing {
+                    self.analyzeWaveform(for: url, shouldCache: true)
+                } else {
+                    self.waveformSamples = cached.waveformSamples
+                }
                 self.coloredWaveformData = cached.coloredWaveformData
                 if let cachedBPM = cached.analyzedBPM {
                     self.analyzedBPM = cachedBPM
@@ -788,14 +878,13 @@ final class AudioPlayerViewModel: ObservableObject {
                 if self.prefersColoredWaveform {
                     if cached.coloredWaveformData != nil {
                         self.addDebugLog("Loaded cached RGB waveform for: \(url.lastPathComponent)")
-                    } else {
+                    } else if !isWaveformMissing {
                         self.analyzeColoredWaveform(for: url, shouldCache: true)
                     }
                 }
             } else {
                 self.addDebugLog("Cache miss - analyzing: \(url.lastPathComponent)")
-                // Sequential: waveform → BPM → key → quality
-                self.analyzeWaveformThenRest(for: url)
+                self.analyzeWaveform(for: url, shouldCache: true, triggerFollowUpAnalysis: true)
             }
         }
     }
@@ -807,6 +896,7 @@ final class AudioPlayerViewModel: ObservableObject {
         bpmAnalysisTask = Task { [weak self] in
             defer {
                 self?.isAnalyzingBPM = false
+                self?.bpmAnalysisTask = nil
                 self?.addDebugLog("BPM analysis ended. isAnalyzingBPM = false")
             }
             guard let self else {
@@ -814,13 +904,9 @@ final class AudioPlayerViewModel: ObservableObject {
                 return
             }
             do {
-                self.addDebugLog("BPM analysis: starting detached task (Ellis DP analyzer)...")
-                let detectedBPM = try await Task.detached(priority: .userInitiated) { [weak self] in
-                    try BPMAnalyzer4.analyze(url: url) { message in
-                        Task { @MainActor in
-                            self?.addDebugLog("BPM: \(message)")
-                        }
-                    }
+                self.addDebugLog("BPM analysis: starting detached background task (Ellis DP analyzer)...")
+                let detectedBPM = try await Task.detached(priority: .utility) {
+                    try BPMAnalyzer4.analyze(url: url)
                 }.value
                 self.addDebugLog("BPM analysis: detached task returned \(detectedBPM)")
                 guard !Task.isCancelled else {
@@ -856,6 +942,7 @@ final class AudioPlayerViewModel: ObservableObject {
         keyAnalysisTask = Task { [weak self] in
             defer {
                 self?.isAnalyzingKey = false
+                self?.keyAnalysisTask = nil
                 self?.addDebugLog("Key analysis ended. isAnalyzingKey = false")
             }
             guard let self else {
@@ -863,13 +950,9 @@ final class AudioPlayerViewModel: ObservableObject {
                 return
             }
             do {
-                self.addDebugLog("Key analysis: starting detached task...")
-                let result = try await Task.detached(priority: .userInitiated) { [weak self] in
-                    try KeyAnalyzer.analyze(url: url) { message in
-                        Task { @MainActor in
-                            self?.addDebugLog("Key: \(message)")
-                        }
-                    }
+                self.addDebugLog("Key analysis: starting detached background task...")
+                let result = try await Task.detached(priority: .utility) {
+                    try KeyAnalyzer.analyze(url: url)
                 }.value
                 self.addDebugLog("Key analysis: detached task returned status=\(result.status.rawValue)")
                 guard !Task.isCancelled else {
@@ -911,13 +994,12 @@ final class AudioPlayerViewModel: ObservableObject {
         qualityAnalysisTask = Task { [weak self] in
             defer {
                 self?.isAnalyzingQuality = false
+                self?.qualityAnalysisTask = nil
             }
             guard let self else { return }
             do {
-                let (result, debug) = try await Task.detached(priority: .userInitiated) {
-                    try WaveformAnalyzer.analyzeQuality(url: url)
-                }.value
-                guard !Task.isCancelled, self.currentURL == capturedURL else { return }
+                let (result, debug) = try await self.waveformAnalysisCoordinator.quality(url: url)
+                guard !Task.isCancelled, self.currentURL == capturedURL, self.proAnalysisEnabled else { return }
                 self.audioQuality = result
                 self.addDebugLog("Quality: \(result.estimatedBitrate.rawValue) | frames=\(debug.totalFrames)")
                 self.addDebugLog("  rel16k=\(String(format: "%.1f", debug.medianRel16k)) rel17k=\(String(format: "%.1f", debug.medianRel17k)) rel18k=\(String(format: "%.1f", debug.medianRel18k))")
@@ -930,51 +1012,63 @@ final class AudioPlayerViewModel: ObservableObject {
             } catch is CancellationError {
                 return
             } catch {
-                self.addDebugLog("Quality analysis error: \(error)")
-                guard !Task.isCancelled, self.currentURL == capturedURL else { return }
+                self.addDebugLog("Quality analysis error: \(self.diagnosticDescription(for: error))")
+                guard !Task.isCancelled, self.currentURL == capturedURL, self.proAnalysisEnabled else { return }
                 self.audioQuality = nil
             }
         }
     }
 
-    /// Sequential pipeline: waveform → BPM → key → quality (cache miss path)
-    private func analyzeWaveformThenRest(for url: URL) {
+    private func analyzeWaveform(
+        for url: URL,
+        shouldCache: Bool = false,
+        triggerFollowUpAnalysis: Bool = false
+    ) {
         let capturedURL = url
         let targetSamples = 2000
+        analysisTask?.cancel()
+        addDebugLog("Waveform analysis started for: \(url.lastPathComponent)")
         analysisTask = Task { [weak self] in
+            defer {
+                self?.analysisTask = nil
+            }
             guard let self else { return }
 
-            // 1. Waveform
             do {
-                let samples = try await Task.detached(priority: .userInitiated) {
-                    try WaveformAnalyzer.analyze(url: url, targetSamples: targetSamples)
-                }.value
+                let samples = try await self.waveformAnalysisCoordinator.waveform(
+                    url: url,
+                    targetSamples: targetSamples
+                )
                 guard !Task.isCancelled, self.currentURL == capturedURL else { return }
                 self.waveformSamples = samples
-                await AudioCache.shared.store(waveformSamples: samples, analyzedBPM: nil, for: url)
-                self.addDebugLog("Waveform cached for: \(url.lastPathComponent)")
+                if shouldCache {
+                    await AudioCache.shared.store(waveformSamples: samples, analyzedBPM: nil, for: url)
+                    self.addDebugLog("Waveform cached for: \(url.lastPathComponent)")
+                }
                 if self.prefersColoredWaveform {
                     self.analyzeColoredWaveform(for: url, shouldCache: true)
+                }
+                if self.showSpectrogram, self.spectrogramImage == nil, !self.isAnalyzingSpectrogram {
+                    self.analyzeAndRenderSpectrogram(for: url)
                 }
             } catch is CancellationError {
                 return
             } catch {
                 guard !Task.isCancelled, self.currentURL == capturedURL else { return }
+                let diagnostic = self.diagnosticDescription(for: error)
                 self.waveformSamples = []
-                self.errorMessage = "Failed to analyze waveform: \(error.localizedDescription)"
+                self.addDebugLog("Waveform analysis error: \(diagnostic)")
+                self.errorMessage = "Failed to analyze waveform: \(diagnostic)"
             }
 
             guard !Task.isCancelled, self.currentURL == capturedURL else { return }
 
-            // 2. BPM
-            self.analyzeBPM(for: url, shouldCache: true)
-
-            // 3. Key
-            self.analyzeKey(for: url, shouldCache: true)
-
-            // 4. Quality (wait for BPM/key to not compete for CPU)
-            if self.proAnalysisEnabled {
-                self.analyzeQuality(for: url, shouldCache: true)
+            if triggerFollowUpAnalysis {
+                self.analyzeBPM(for: url, shouldCache: true)
+                self.analyzeKey(for: url, shouldCache: true)
+                if self.proAnalysisEnabled {
+                    self.analyzeQuality(for: url, shouldCache: true)
+                }
             }
         }
     }
@@ -1016,6 +1110,7 @@ final class AudioPlayerViewModel: ObservableObject {
     }
 
     func stopAndReset() {
+        let previousURL = currentURL
         stopPlayback()
         stopEngine()
         analysisTask?.cancel()
@@ -1024,6 +1119,7 @@ final class AudioPlayerViewModel: ObservableObject {
         spectrogramTask?.cancel()
         coloredWaveformTask?.cancel()
         qualityAnalysisTask?.cancel()
+        cancelWaveformFamily(for: previousURL)
         duration = 0
         waveformSamples = []
         coloredWaveformData = nil

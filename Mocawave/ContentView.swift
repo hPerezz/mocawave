@@ -134,9 +134,11 @@ struct DebugWindow: View {
 class FixedHeightWindowDelegate: NSObject, NSWindowDelegate {
     static var associatedKey = 0
     private let fixedHeight: CGFloat
+    private let viewModel: AudioPlayerViewModel
 
-    init(fixedHeight: CGFloat) {
+    init(fixedHeight: CGFloat, viewModel: AudioPlayerViewModel) {
         self.fixedHeight = fixedHeight
+        self.viewModel = viewModel
     }
 
     func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
@@ -149,9 +151,9 @@ class FixedHeightWindowDelegate: NSObject, NSWindowDelegate {
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         MainActor.assumeIsolated {
-            AudioPlayerViewModel.shared.stopAndReset()
+            viewModel.stopAndReset()
+            AudioOpenCoordinator.shared.unregister(window: sender)
         }
-        NSApp.terminate(nil)
         return true
     }
 }
@@ -912,7 +914,7 @@ struct TopBarInstagramCell: View {
 
 struct ContentView: View {
     @EnvironmentObject private var proStore: ProEntitlementStore
-    @ObservedObject private var viewModel = AudioPlayerViewModel.shared
+    @StateObject private var viewModel: AudioPlayerViewModel
     @State private var isDropTargeted = false
     @State private var isImportingAudio = false
     @State private var keyMonitor: Any?
@@ -930,6 +932,11 @@ struct ContentView: View {
     private static let windowContentHeight: CGFloat = 172
     private static let minimumWindowWidth: CGFloat = 806
     private static let supportedAudioContentTypes = ["mp3", "wav", "aac", "m4a"].compactMap { UTType(filenameExtension: $0) }
+
+    @MainActor
+    init(viewModel: AudioPlayerViewModel? = nil) {
+        _viewModel = StateObject(wrappedValue: viewModel ?? AudioPlayerViewModel())
+    }
 
     var body: some View {
         let isSleepMode = viewModel.duration > 0 && !viewModel.isPlaying
@@ -995,8 +1002,18 @@ struct ContentView: View {
                         }
                         if viewModel.waveformSamples.isEmpty {
                             if viewModel.duration > 0 {
-                                LoadingWaveformView()
-                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                ZStack {
+                                    PendingWaveformView(
+                                        progress: viewModel.progress,
+                                        onSeek: { fraction in
+                                            viewModel.seekToFraction(fraction)
+                                        }
+                                    )
+
+                                    LoadingWaveformView()
+                                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                                        .allowsHitTesting(false)
+                                }
                             } else {
                                 Text("Drop an audio or click to open")
                                     .foregroundColor(.secondary)
@@ -1006,9 +1023,6 @@ struct ContentView: View {
                                         requestAudioImport()
                                     }
                             }
-                        } else if viewModel.shouldRenderColoredWaveform && viewModel.coloredWaveformData == nil && viewModel.isAnalyzingColoredWaveform {
-                            LoadingWaveformView(title: "Analizing Frequencies")
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                     }
                 }
@@ -1094,6 +1108,7 @@ struct ContentView: View {
         .configureWindow { window in
             windowRef = window
             applyWindowStyle(window)
+            AudioOpenCoordinator.shared.register(window: window, viewModel: viewModel)
         }
         .preferredColorScheme(.dark)
         .ignoresSafeArea()
@@ -1106,6 +1121,9 @@ struct ContentView: View {
         }
         .onDisappear {
             removeKeyMonitor()
+            if let windowRef {
+                AudioOpenCoordinator.shared.unregister(window: windowRef)
+            }
         }
         .onChange(of: proStore.effectiveProAccess) { hasAccess in
             viewModel.handleProAccessChanged()
@@ -1216,7 +1234,7 @@ struct ContentView: View {
         window.maxSize = NSSize(width: .greatestFiniteMagnitude, height: contentHeight)
 
         // Lock vertical resize
-        let resizeDelegate = FixedHeightWindowDelegate(fixedHeight: contentHeight)
+        let resizeDelegate = FixedHeightWindowDelegate(fixedHeight: contentHeight, viewModel: viewModel)
         objc_setAssociatedObject(window, &FixedHeightWindowDelegate.associatedKey, resizeDelegate, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         window.delegate = resizeDelegate
 

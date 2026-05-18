@@ -145,6 +145,19 @@ private enum WaveformResampler {
     private static func interpolatedValue(_ lower: Float, _ upper: Float, fraction: Float) -> Float {
         lower + (upper - lower) * fraction
     }
+
+    static func placeholderSamples(count: Int) -> [Float] {
+        guard count > 0 else { return [] }
+
+        return (0..<count).map { index in
+            let position = Double(index) / Double(max(count - 1, 1))
+            let broadWave = 0.34 + 0.18 * sin(position * .pi * 2.2)
+            let mediumWave = 0.14 * sin(position * .pi * 7.4 + 0.6)
+            let fineWave = 0.08 * sin(position * .pi * 19.0 + 1.1)
+            let pulse = 0.12 * pow(sin(position * .pi * 4.0), 2)
+            return Float(min(max(broadWave + mediumWave + fineWave + pulse, 0.08), 0.92))
+        }
+    }
 }
 
 // MARK: - WaveformView
@@ -336,6 +349,133 @@ struct ColoredWaveformView: View {
                     }
             )
         }
+    }
+}
+
+struct PendingWaveformView: View {
+    let progress: Double
+    let onSeek: (Double) -> Void
+
+    @State private var hoverX: CGFloat? = nil
+
+    private let placeholderSamples = WaveformResampler.placeholderSamples(count: 320)
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { timeline in
+            GeometryReader { proxy in
+                let size = proxy.size
+                let time = timeline.date.timeIntervalSinceReferenceDate
+
+                ZStack {
+                    Canvas { context, size in
+                        guard !placeholderSamples.isEmpty else { return }
+
+                        let barWidth: CGFloat = 2
+                        let barSpacing: CGFloat = 1
+                        let barCount = max(1, Int((size.width + barSpacing) / (barWidth + barSpacing)))
+                        let renderSamples = WaveformResampler.resample(placeholderSamples, to: barCount)
+                        let clampedProgress = min(max(progress, 0), 1)
+                        let progressIndex = min(Int(Double(barCount) * clampedProgress), barCount - 1)
+
+                        for index in 0..<barCount {
+                            let sample = animatedPlaceholderSample(
+                                baseSample: CGFloat(renderSamples[index]),
+                                index: index,
+                                time: time
+                            )
+                            let barHeight = max(1, sample * size.height)
+                            let x = CGFloat(index) * (barWidth + barSpacing)
+                            let y = (size.height - barHeight) / 2
+                            let rect = CGRect(x: x, y: y, width: barWidth, height: barHeight)
+                            let shimmer = 0.08 + 0.08 * (0.5 + 0.5 * sin(time * 2.1 + Double(index) * 0.19))
+                            let color = index <= progressIndex
+                                ? Color.accentColor.opacity(0.84 + shimmer)
+                                : Color.secondary.opacity(0.34 + shimmer * 0.35)
+                            context.fill(
+                                Path(roundedRect: rect, cornerRadius: barWidth / 2),
+                                with: .color(color)
+                            )
+                        }
+
+                        if let hx = hoverX, hx >= 0 {
+                            let hoverIndex = min(Int(hx / (barWidth + barSpacing)), barCount - 1)
+
+                            if hoverIndex > progressIndex {
+                                for index in (progressIndex + 1)...hoverIndex {
+                                    let x = CGFloat(index) * (barWidth + barSpacing)
+                                    guard x + barWidth <= hx else { break }
+                                    let sample = animatedPlaceholderSample(
+                                        baseSample: CGFloat(renderSamples[index]),
+                                        index: index,
+                                        time: time
+                                    )
+                                    let barHeight = max(1, sample * size.height)
+                                    let y = (size.height - barHeight) / 2
+                                    let rect = CGRect(x: x, y: y, width: barWidth, height: barHeight)
+                                    context.fill(
+                                        Path(roundedRect: rect, cornerRadius: barWidth / 2),
+                                        with: .color(Color.white.opacity(0.15))
+                                    )
+                                }
+                            } else if hoverIndex < progressIndex {
+                                for index in hoverIndex...progressIndex {
+                                    let x = CGFloat(index) * (barWidth + barSpacing)
+                                    let sample = animatedPlaceholderSample(
+                                        baseSample: CGFloat(renderSamples[index]),
+                                        index: index,
+                                        time: time
+                                    )
+                                    let barHeight = max(1, sample * size.height)
+                                    let y = (size.height - barHeight) / 2
+                                    let rect = CGRect(x: x, y: y, width: barWidth, height: barHeight)
+                                    context.fill(
+                                        Path(roundedRect: rect, cornerRadius: barWidth / 2),
+                                        with: .color(Color.black.opacity(0.3))
+                                    )
+                                }
+                            }
+
+                            let hoverSample = animatedPlaceholderSample(
+                                baseSample: CGFloat(renderSamples[max(0, hoverIndex)]),
+                                index: hoverIndex,
+                                time: time
+                            )
+                            let lineHeight = max(1, hoverSample * size.height)
+                            let lineY = (size.height - lineHeight) / 2
+                            let lineRect = CGRect(x: hx - 0.5, y: lineY, width: 1, height: lineHeight)
+                            context.fill(Path(lineRect), with: .color(Color.white.opacity(0.25)))
+                        }
+                    }
+
+                    MouseTrackingView(
+                        onMove: { x in
+                            hoverX = min(max(x, 0), size.width)
+                        },
+                        onExit: {
+                            hoverX = nil
+                        }
+                    )
+                }
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            let width = max(size.width, 1)
+                            let fraction = min(max(value.location.x / width, 0), 1)
+                            onSeek(fraction)
+                        }
+                )
+            }
+        }
+    }
+
+    private func animatedPlaceholderSample(baseSample: CGFloat, index: Int, time: TimeInterval) -> CGFloat {
+        let normalizedIndex = Double(index) / 42.0
+        let breathe = 0.72 + 0.28 * (0.5 + 0.5 * sin(time * 1.1))
+        let travelingSwell = 0.78 + 0.34 * (0.5 + 0.5 * sin((time * 1.7) - normalizedIndex))
+        let ripple = 0.90 + 0.14 * sin((time * 0.9) + normalizedIndex * 2.4)
+        let animated = baseSample * breathe * travelingSwell * ripple
+        return min(max(animated, 0.08), 0.98)
     }
 }
 

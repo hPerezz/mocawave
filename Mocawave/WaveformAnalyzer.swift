@@ -2,15 +2,48 @@ import Accelerate
 import AVFoundation
 
 enum WaveformAnalyzer {
-    enum WaveformError: Error {
+    enum WaveformError: LocalizedError {
+        case audioFileOpen(url: URL, underlying: NSError)
+        case audioRead(
+            url: URL,
+            framePosition: AVAudioFramePosition,
+            chunkIndex: Int,
+            processing: String,
+            file: String,
+            underlying: NSError
+        )
+        case unsupportedProcessingFormat(processing: String, file: String)
+        case readBufferAllocationFailed(format: String, frameCapacity: AVAudioFrameCount)
+        case missingChannelData(format: String)
+        case fftSetupFailed
         case conversionFailed
-        case assetReaderFailed
         case invalidDuration
+
+        var errorDescription: String? {
+            switch self {
+            case let .audioFileOpen(url, underlying):
+                return "audio file open failed for \(url.lastPathComponent) [\(underlying.domain) \(underlying.code)]: \(underlying.localizedDescription)"
+            case let .audioRead(url, framePosition, chunkIndex, processing, file, underlying):
+                return "audio read failed for \(url.lastPathComponent) at frame=\(framePosition) chunk=\(chunkIndex) processing=\(processing) file=\(file) [\(underlying.domain) \(underlying.code)]: \(underlying.localizedDescription)"
+            case let .unsupportedProcessingFormat(processing, file):
+                return "unsupported processing format: processing=\(processing), file=\(file)"
+            case let .readBufferAllocationFailed(format, frameCapacity):
+                return "buffer allocation failed for format=\(format), frameCapacity=\(frameCapacity)"
+            case let .missingChannelData(format):
+                return "missing PCM channel data for format=\(format)"
+            case .fftSetupFailed:
+                return "FFT setup failed"
+            case .conversionFailed:
+                return "audio conversion failed"
+            case .invalidDuration:
+                return "invalid audio duration"
+            }
+        }
     }
 
     // MARK: - Audio Quality Types
 
-    enum EstimatedBitrate: String, Codable {
+    enum EstimatedBitrate: String, Codable, Sendable {
         case kbps128 = "128k"
         case kbps192 = "192k"
         case kbps256 = "256k"
@@ -18,15 +51,15 @@ enum WaveformAnalyzer {
         case lossless = "Lossless"
     }
 
-    struct AudioQualityResult: Codable {
+    struct AudioQualityResult: Codable, Sendable {
         let maxEffectiveFrequency: Float
         let highFreqEnergyRatio: Float
         let cutoffSharpness: Float
         let estimatedBitrate: EstimatedBitrate
     }
 
-    struct ColoredWaveformData: Codable, Equatable {
-        struct Column: Codable, Equatable {
+    struct ColoredWaveformData: Codable, Equatable, Sendable {
+        struct Column: Codable, Equatable, Sendable {
             var height: Float
             var red: Float
             var green: Float
@@ -37,39 +70,164 @@ enum WaveformAnalyzer {
     }
 
     // FFT configuration
-    private static let fftSize = 4096
-    private static let bassMaxHz: Float = 250.0
-    private static let bassMinHz: Float = 20.0
-    private static let midMaxHz: Float = 4000.0
-    private static let highMaxHz: Float = 16000.0
-    private static let coloredWaveformHeightBassWeight: Float = 2.8
-    private static let coloredWaveformHeightMidWeight: Float = 0.55
-    private static let coloredWaveformHeightHighWeight: Float = 0.28
-    private static let coloredWaveformBassPresenceFloor: Float = 0.28
-    private static let coloredWaveformBassPresenceExponent: Float = 0.35
-    private static let coloredWaveformColorBassWeight: Float = 2.6
-    private static let coloredWaveformColorMidWeight: Float = 0.9
-    private static let coloredWaveformColorHighWeight: Float = 0.75
-    private static let coloredWaveformRedDominanceThreshold: Float = 0.42
-    private static let coloredWaveformPureRedThreshold: Float = 0.58
-    private static let coloredWaveformRedDominanceBoost: Float = 1.8
-    private static let coloredWaveformGreenSuppression: Float = 0.55
-    private static let coloredWaveformBlueSuppression: Float = 0.65
+    nonisolated private static let fftSize = 4096
+    nonisolated private static let bassMaxHz: Float = 250.0
+    nonisolated private static let bassMinHz: Float = 20.0
+    nonisolated private static let midMaxHz: Float = 4000.0
+    nonisolated private static let highMaxHz: Float = 16000.0
+    nonisolated private static let coloredWaveformHeightBassWeight: Float = 2.8
+    nonisolated private static let coloredWaveformHeightMidWeight: Float = 0.55
+    nonisolated private static let coloredWaveformHeightHighWeight: Float = 0.28
+    nonisolated private static let coloredWaveformBassPresenceFloor: Float = 0.28
+    nonisolated private static let coloredWaveformBassPresenceExponent: Float = 0.35
+    nonisolated private static let coloredWaveformColorBassWeight: Float = 2.6
+    nonisolated private static let coloredWaveformColorMidWeight: Float = 0.9
+    nonisolated private static let coloredWaveformColorHighWeight: Float = 0.75
+    nonisolated private static let coloredWaveformRedDominanceThreshold: Float = 0.42
+    nonisolated private static let coloredWaveformPureRedThreshold: Float = 0.58
+    nonisolated private static let coloredWaveformRedDominanceBoost: Float = 1.8
+    nonisolated private static let coloredWaveformGreenSuppression: Float = 0.55
+    nonisolated private static let coloredWaveformBlueSuppression: Float = 0.65
 
-    static func analyze(url: URL, targetSamples: Int) throws -> [Float] {
-        do {
-            return try analyzeWithAudioFile(url: url, targetSamples: targetSamples)
-        } catch {
-            return try analyzeWithAssetReader(url: url, targetSamples: targetSamples)
+    private final class MonoPCMDecoder {
+        let totalFrames: Int64
+        let sampleRate: Float
+
+        private let sourceURL: URL
+        private let audioFile: AVAudioFile
+        private let readBuffer: AVAudioPCMBuffer
+        private var monoScratch: [Float]
+
+        init(url: URL, bufferSize: AVAudioFrameCount = 4096) throws {
+            let audioFile: AVAudioFile
+            do {
+                audioFile = try AVAudioFile(
+                    forReading: url,
+                    commonFormat: .pcmFormatFloat32,
+                    interleaved: false
+                )
+            } catch {
+                throw WaveformError.audioFileOpen(url: url, underlying: error as NSError)
+            }
+
+            let processingFormat = audioFile.processingFormat
+            guard processingFormat.commonFormat == .pcmFormatFloat32,
+                  !processingFormat.isInterleaved else {
+                throw WaveformError.unsupportedProcessingFormat(
+                    processing: Self.describe(format: processingFormat),
+                    file: Self.describe(format: audioFile.fileFormat)
+                )
+            }
+            guard let readBuffer = AVAudioPCMBuffer(pcmFormat: processingFormat, frameCapacity: bufferSize) else {
+                throw WaveformError.readBufferAllocationFailed(
+                    format: Self.describe(format: processingFormat),
+                    frameCapacity: bufferSize
+                )
+            }
+
+            self.sourceURL = url
+            self.audioFile = audioFile
+            self.readBuffer = readBuffer
+            self.monoScratch = [Float](repeating: 0, count: Int(bufferSize))
+            self.totalFrames = max(Int64(audioFile.length), 0)
+            self.sampleRate = Float(processingFormat.sampleRate)
+        }
+
+        func decode(_ body: (UnsafePointer<Float>, Int) throws -> Void) throws {
+            var chunkIndex = 0
+            while true {
+                try Task.checkCancellation()
+                let remainingFrames = totalFrames - Int64(audioFile.framePosition)
+                if remainingFrames <= 0 { break }
+
+                readBuffer.frameLength = 0
+                let requestedFrameCount = AVAudioFrameCount(
+                    min(Int64(readBuffer.frameCapacity), remainingFrames)
+                )
+
+                do {
+                    try autoreleasepool {
+                        try audioFile.read(into: readBuffer, frameCount: requestedFrameCount)
+                    }
+                } catch {
+                    throw WaveformError.audioRead(
+                        url: sourceURL,
+                        framePosition: audioFile.framePosition,
+                        chunkIndex: chunkIndex,
+                        processing: Self.describe(format: audioFile.processingFormat),
+                        file: Self.describe(format: audioFile.fileFormat),
+                        underlying: error as NSError
+                    )
+                }
+
+                let frameLength = Int(readBuffer.frameLength)
+                if frameLength == 0 { break }
+                chunkIndex += 1
+
+                guard let channelData = readBuffer.floatChannelData else {
+                    throw WaveformError.missingChannelData(format: Self.describe(format: readBuffer.format))
+                }
+
+                let channelCount = Int(readBuffer.format.channelCount)
+                guard channelCount > 0 else {
+                    throw WaveformError.missingChannelData(format: Self.describe(format: readBuffer.format))
+                }
+
+                if channelCount == 1 {
+                    try body(UnsafePointer(channelData[0]), frameLength)
+                    continue
+                }
+
+                if monoScratch.count < frameLength {
+                    monoScratch = [Float](repeating: 0, count: frameLength)
+                }
+
+                let scale = 1.0 / Float(channelCount)
+                try monoScratch.withUnsafeMutableBufferPointer { monoBuffer in
+                    guard let monoBase = monoBuffer.baseAddress else {
+                        throw WaveformError.missingChannelData(format: Self.describe(format: readBuffer.format))
+                    }
+
+                    for sampleIndex in 0..<frameLength {
+                        var mixedSample: Float = 0
+                        for channel in 0..<channelCount {
+                            mixedSample += channelData[channel][sampleIndex]
+                        }
+                        monoBase[sampleIndex] = mixedSample * scale
+                    }
+
+                    try body(UnsafePointer(monoBase), frameLength)
+                }
+            }
+        }
+
+        private static func describe(format: AVAudioFormat) -> String {
+            let commonFormat: String
+            switch format.commonFormat {
+            case .otherFormat:
+                commonFormat = "other"
+            case .pcmFormatFloat32:
+                commonFormat = "float32"
+            case .pcmFormatFloat64:
+                commonFormat = "float64"
+            case .pcmFormatInt16:
+                commonFormat = "int16"
+            case .pcmFormatInt32:
+                commonFormat = "int32"
+            @unknown default:
+                commonFormat = "unknown"
+            }
+
+            return "\(Int(format.channelCount))ch @ \(Int(format.sampleRate))Hz, \(commonFormat), \(format.isInterleaved ? "interleaved" : "non-interleaved")"
         }
     }
 
-    static func analyzeColoredWaveform(url: URL, targetColumns: Int = 2000) throws -> ColoredWaveformData {
-        do {
-            return try coloredWaveformWithAudioFile(url: url, targetColumns: targetColumns)
-        } catch {
-            return try coloredWaveformWithAssetReader(url: url, targetColumns: targetColumns)
-        }
+    nonisolated static func analyze(url: URL, targetSamples: Int) throws -> [Float] {
+        try analyzeWithAudioFile(url: url, targetSamples: targetSamples)
+    }
+
+    nonisolated static func analyzeColoredWaveform(url: URL, targetColumns: Int = 2000) throws -> ColoredWaveformData {
+        try coloredWaveformWithAudioFile(url: url, targetColumns: targetColumns)
     }
 
     // MARK: - FFT Bass Energy
@@ -138,44 +296,24 @@ enum WaveformAnalyzer {
     // MARK: - Analyze with AudioFile
 
     private static func analyzeWithAudioFile(url: URL, targetSamples: Int) throws -> [Float] {
-        let audioFile = try AVAudioFile(forReading: url)
-        let inputFormat = audioFile.processingFormat
-        guard let outputFormat = AVAudioFormat(
-            standardFormatWithSampleRate: inputFormat.sampleRate,
-            channels: 1 // Mix to mono for FFT analysis
-        ) else {
-            throw WaveformError.conversionFailed
-        }
-        guard let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
-            throw WaveformError.conversionFailed
-        }
-
-        let totalFrames = max(Int64(audioFile.length), 0)
+        let decoder = try MonoPCMDecoder(url: url)
+        let totalFrames = decoder.totalFrames
         guard totalFrames > 0 else { return [] }
 
         let maxTarget = Int(min(totalFrames, Int64(Int.max)))
         let clampedTarget = max(1, min(targetSamples, maxTarget))
         let framesPerSample = Double(totalFrames) / Double(clampedTarget)
-        let bufferSize: AVAudioFrameCount = 4096
 
-        guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: bufferSize),
-              let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: bufferSize) else {
-            return []
-        }
-
-        // FFT setup
         let log2n = vDSP_Length(log2(Float(fftSize)))
         guard let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(FFT_RADIX2)) else {
-            return []
+            throw WaveformError.fftSetupFailed
         }
         defer { vDSP_destroy_fftsetup(fftSetup) }
 
         var hannWindow = [Float](repeating: 0, count: fftSize)
         vDSP_hann_window(&hannWindow, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
 
-        let sampleRate = Float(outputFormat.sampleRate)
-        
-        // Accumulation buffer for FFT
+        let sampleRate = decoder.sampleRate
         var fftBuffer = [Float](repeating: 0, count: fftSize)
         var fftBufferPos = 0
         var samples = [Float](repeating: 0, count: clampedTarget)
@@ -183,57 +321,16 @@ enum WaveformAnalyzer {
         var currentBassEnergy: Float = 0
         var fftCountInSample = 0
         var frameIndex: Int64 = 0
-        var readError: Error?
-        var isEOF = false
 
-        let inputBlock: AVAudioConverterInputBlock = { inNumFrames, outStatus in
-            if isEOF {
-                outStatus.pointee = .endOfStream
-                return nil
-            }
-
-            do {
-                let framesToRead = min(inNumFrames, inputBuffer.frameCapacity)
-                try audioFile.read(into: inputBuffer, frameCount: framesToRead)
-            } catch {
-                readError = error
-                outStatus.pointee = .endOfStream
-                isEOF = true
-                return nil
-            }
-
-            if inputBuffer.frameLength == 0 {
-                outStatus.pointee = .endOfStream
-                isEOF = true
-                return nil
-            }
-
-            outStatus.pointee = .haveData
-            return inputBuffer
-        }
-
-        while !isEOF {
-            outputBuffer.frameLength = 0
-            var conversionError: NSError?
-            let status = converter.convert(to: outputBuffer, error: &conversionError, withInputFrom: inputBlock)
-            if let readError {
-                throw readError
-            }
-            if status == .error {
-                throw conversionError ?? WaveformError.conversionFailed
-            }
-
-            let frameLength = Int(outputBuffer.frameLength)
-            if frameLength == 0 { continue }
-
-            guard let channelData = outputBuffer.floatChannelData else { continue }
-            let monoData = channelData[0]
-
+        try decoder.decode { monoData, frameLength in
             for frame in 0..<frameLength {
+                if frame.isMultiple(of: 1024) {
+                    try Task.checkCancellation()
+                }
+
                 fftBuffer[fftBufferPos] = monoData[frame]
                 fftBufferPos += 1
 
-                // When FFT buffer is full, compute bass energy
                 if fftBufferPos >= fftSize {
                     let energy = bassEnergy(
                         from: fftBuffer, count: fftSize,
@@ -248,10 +345,8 @@ enum WaveformAnalyzer {
                 frameIndex += 1
                 let sampleIndex = Int(Double(frameIndex) / framesPerSample)
                 if sampleIndex > currentSample {
-                    // Flush any remaining FFT buffer
                     if fftBufferPos > 0 {
-                        // Zero-pad the rest
-                        for i in fftBufferPos..<fftSize { fftBuffer[i] = 0 }
+                        for index in fftBufferPos..<fftSize { fftBuffer[index] = 0 }
                         let energy = bassEnergy(
                             from: fftBuffer, count: fftBufferPos,
                             fftSetup: fftSetup, window: hannWindow,
@@ -270,10 +365,9 @@ enum WaveformAnalyzer {
             }
         }
 
-        // Flush final sample
         if currentSample < samples.count {
             if fftBufferPos > 0 {
-                for i in fftBufferPos..<fftSize { fftBuffer[i] = 0 }
+                for index in fftBufferPos..<fftSize { fftBuffer[index] = 0 }
                 let energy = bassEnergy(
                     from: fftBuffer, count: fftBufferPos,
                     fftSetup: fftSetup, window: hannWindow,
@@ -459,40 +553,23 @@ enum WaveformAnalyzer {
     }
 
     private static func coloredWaveformWithAudioFile(url: URL, targetColumns: Int) throws -> ColoredWaveformData {
-        let audioFile = try AVAudioFile(forReading: url)
-        let inputFormat = audioFile.processingFormat
-        guard let outputFormat = AVAudioFormat(
-            standardFormatWithSampleRate: inputFormat.sampleRate,
-            channels: 1
-        ) else {
-            throw WaveformError.conversionFailed
-        }
-        guard let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
-            throw WaveformError.conversionFailed
-        }
-
-        let totalFrames = max(Int64(audioFile.length), 0)
+        let decoder = try MonoPCMDecoder(url: url)
+        let totalFrames = decoder.totalFrames
         guard totalFrames > 0 else { return ColoredWaveformData(columns: []) }
 
         let clampedTarget = max(1, min(targetColumns, Int(min(totalFrames, Int64(Int.max)))))
         let framesPerColumn = Double(totalFrames) / Double(clampedTarget)
-        let bufferSize: AVAudioFrameCount = 4096
-
-        guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: bufferSize),
-              let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: bufferSize) else {
-            throw WaveformError.conversionFailed
-        }
 
         let log2n = vDSP_Length(log2(Float(fftSize)))
         guard let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(FFT_RADIX2)) else {
-            throw WaveformError.conversionFailed
+            throw WaveformError.fftSetupFailed
         }
         defer { vDSP_destroy_fftsetup(fftSetup) }
 
         var hannWindow = [Float](repeating: 0, count: fftSize)
         vDSP_hann_window(&hannWindow, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
 
-        let sampleRate = Float(outputFormat.sampleRate)
+        let sampleRate = decoder.sampleRate
         var fftBuffer = [Float](repeating: 0, count: fftSize)
         var fftBufferPos = 0
 
@@ -507,8 +584,6 @@ enum WaveformAnalyzer {
         var currentHigh: Float = 0
         var fftCountInColumn = 0
         var frameIndex: Int64 = 0
-        var readError: Error?
-        var isEOF = false
 
         func flushColumn() {
             guard currentColumn < columns.count, fftCountInColumn > 0 else { return }
@@ -526,44 +601,12 @@ enum WaveformAnalyzer {
             fftCountInColumn = 0
         }
 
-        let inputBlock: AVAudioConverterInputBlock = { inNumFrames, outStatus in
-            if isEOF {
-                outStatus.pointee = .endOfStream
-                return nil
-            }
-
-            do {
-                try audioFile.read(into: inputBuffer, frameCount: min(inNumFrames, inputBuffer.frameCapacity))
-            } catch {
-                readError = error
-                outStatus.pointee = .endOfStream
-                isEOF = true
-                return nil
-            }
-
-            if inputBuffer.frameLength == 0 {
-                outStatus.pointee = .endOfStream
-                isEOF = true
-                return nil
-            }
-
-            outStatus.pointee = .haveData
-            return inputBuffer
-        }
-
-        while !isEOF {
-            outputBuffer.frameLength = 0
-            var conversionError: NSError?
-            let status = converter.convert(to: outputBuffer, error: &conversionError, withInputFrom: inputBlock)
-            if let readError { throw readError }
-            if status == .error { throw conversionError ?? WaveformError.conversionFailed }
-
-            let frameLength = Int(outputBuffer.frameLength)
-            if frameLength == 0 { continue }
-            guard let channelData = outputBuffer.floatChannelData else { continue }
-            let monoData = channelData[0]
-
+        try decoder.decode { monoData, frameLength in
             for frame in 0..<frameLength {
+                if frame.isMultiple(of: 1024) {
+                    try Task.checkCancellation()
+                }
+
                 fftBuffer[fftBufferPos] = monoData[frame]
                 fftBufferPos += 1
 
@@ -632,334 +675,10 @@ enum WaveformAnalyzer {
         return data
     }
 
-    private static func coloredWaveformWithAssetReader(url: URL, targetColumns: Int) throws -> ColoredWaveformData {
-        let asset = AVURLAsset(url: url)
-        guard let audioTrack = asset.tracks(withMediaType: .audio).first else {
-            throw WaveformError.assetReaderFailed
-        }
-        guard let firstDesc = audioTrack.formatDescriptions.first else {
-            throw WaveformError.assetReaderFailed
-        }
-        let formatDesc = firstDesc as! CMAudioFormatDescription
-        guard let asbdPointer = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) else {
-            throw WaveformError.assetReaderFailed
-        }
-
-        let asbd = asbdPointer.pointee
-        let sampleRate = asbd.mSampleRate
-        guard sampleRate > 0, asbd.mChannelsPerFrame > 0 else {
-            throw WaveformError.assetReaderFailed
-        }
-
-        let durationSeconds = CMTimeGetSeconds(asset.duration)
-        guard durationSeconds.isFinite, durationSeconds > 0 else {
-            throw WaveformError.invalidDuration
-        }
-
-        let totalFrames = Int64(durationSeconds * sampleRate)
-        guard totalFrames > 0 else { return ColoredWaveformData(columns: []) }
-
-        let clampedTarget = max(1, min(targetColumns, Int(min(totalFrames, Int64(Int.max)))))
-        let framesPerColumn = Double(totalFrames) / Double(clampedTarget)
-
-        let outputSettings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: sampleRate,
-            AVNumberOfChannelsKey: 1,
-            AVLinearPCMBitDepthKey: 32,
-            AVLinearPCMIsFloatKey: true,
-            AVLinearPCMIsNonInterleaved: true
-        ]
-
-        let reader = try AVAssetReader(asset: asset)
-        let output = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: outputSettings)
-        output.alwaysCopiesSampleData = false
-        guard reader.canAdd(output) else { throw WaveformError.assetReaderFailed }
-        reader.add(output)
-        guard reader.startReading() else { throw reader.error ?? WaveformError.assetReaderFailed }
-
-        let log2n = vDSP_Length(log2(Float(fftSize)))
-        guard let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(FFT_RADIX2)) else {
-            throw WaveformError.assetReaderFailed
-        }
-        defer { vDSP_destroy_fftsetup(fftSetup) }
-
-        var hannWindow = [Float](repeating: 0, count: fftSize)
-        vDSP_hann_window(&hannWindow, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
-
-        let sampleRateF = Float(sampleRate)
-        var fftBuffer = [Float](repeating: 0, count: fftSize)
-        var fftBufferPos = 0
-
-        var columns = [ColoredWaveformData.Column](
-            repeating: ColoredWaveformData.Column(height: 0, red: 0, green: 0, blue: 0),
-            count: clampedTarget
-        )
-        var currentColumn = 0
-        var currentTotal: Float = 0
-        var currentLow: Float = 0
-        var currentMid: Float = 0
-        var currentHigh: Float = 0
-        var fftCountInColumn = 0
-        var frameIndex: Int64 = 0
-
-        func flushColumn() {
-            guard currentColumn < columns.count, fftCountInColumn > 0 else { return }
-            let divisor = Float(fftCountInColumn)
-            columns[currentColumn] = ColoredWaveformData.Column(
-                height: currentTotal / divisor,
-                red: currentLow / divisor,
-                green: currentMid / divisor,
-                blue: currentHigh / divisor
-            )
-            currentTotal = 0
-            currentLow = 0
-            currentMid = 0
-            currentHigh = 0
-            fftCountInColumn = 0
-        }
-
-        while reader.status == .reading {
-            guard let sampleBuffer = output.copyNextSampleBuffer() else { break }
-            let frameCount = CMSampleBufferGetNumSamples(sampleBuffer)
-            if frameCount == 0 { continue }
-
-            let didProcess = withAudioBufferList(from: sampleBuffer) { bufferList in
-                guard bufferList.count >= 1, let data = bufferList[0].mData else { return false }
-                let floatData = data.assumingMemoryBound(to: Float.self)
-
-                for frame in 0..<frameCount {
-                    fftBuffer[fftBufferPos] = floatData[frame]
-                    fftBufferPos += 1
-
-                    if fftBufferPos >= fftSize {
-                        let energy = rgbFrameEnergy(
-                            from: fftBuffer,
-                            count: fftSize,
-                            fftSetup: fftSetup,
-                            window: hannWindow,
-                            sampleRate: sampleRateF
-                        )
-                        currentTotal += energy.total
-                        currentLow += energy.low
-                        currentMid += energy.mid
-                        currentHigh += energy.high
-                        fftCountInColumn += 1
-                        fftBufferPos = 0
-                    }
-
-                    frameIndex += 1
-                    let nextColumn = Int(Double(frameIndex) / framesPerColumn)
-                    if nextColumn > currentColumn {
-                        if fftBufferPos > 0 {
-                            for index in fftBufferPos..<fftSize { fftBuffer[index] = 0 }
-                            let energy = rgbFrameEnergy(
-                                from: fftBuffer,
-                                count: fftBufferPos,
-                                fftSetup: fftSetup,
-                                window: hannWindow,
-                                sampleRate: sampleRateF
-                            )
-                            currentTotal += energy.total
-                            currentLow += energy.low
-                            currentMid += energy.mid
-                            currentHigh += energy.high
-                            fftCountInColumn += 1
-                            fftBufferPos = 0
-                        }
-                        flushColumn()
-                        currentColumn = min(nextColumn, clampedTarget - 1)
-                    }
-                }
-                return true
-            }
-            if !didProcess { continue }
-        }
-
-        if currentColumn < columns.count {
-            if fftBufferPos > 0 {
-                for index in fftBufferPos..<fftSize { fftBuffer[index] = 0 }
-                let energy = rgbFrameEnergy(
-                    from: fftBuffer,
-                    count: fftBufferPos,
-                    fftSetup: fftSetup,
-                    window: hannWindow,
-                    sampleRate: sampleRateF
-                )
-                currentTotal += energy.total
-                currentLow += energy.low
-                currentMid += energy.mid
-                currentHigh += energy.high
-                fftCountInColumn += 1
-            }
-            flushColumn()
-        }
-
-        if reader.status == .failed || reader.status == .cancelled {
-            throw reader.error ?? WaveformError.assetReaderFailed
-        }
-
-        var data = ColoredWaveformData(columns: columns)
-        normalizeColoredWaveform(&data)
-        return data
-    }
-
-    // MARK: - Analyze with AssetReader
-
-    private static func analyzeWithAssetReader(url: URL, targetSamples: Int) throws -> [Float] {
-        let asset = AVURLAsset(url: url)
-        guard let audioTrack = asset.tracks(withMediaType: .audio).first else { return [] }
-        guard let firstDesc = audioTrack.formatDescriptions.first else {
-            throw WaveformError.assetReaderFailed
-        }
-        let formatDesc = firstDesc as! CMAudioFormatDescription
-        guard let asbdPointer = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) else {
-            throw WaveformError.assetReaderFailed
-        }
-
-        let asbd = asbdPointer.pointee
-        let sampleRate = asbd.mSampleRate
-        let channelCount = Int(asbd.mChannelsPerFrame)
-        guard sampleRate > 0, channelCount > 0 else {
-            throw WaveformError.assetReaderFailed
-        }
-
-        let durationSeconds = CMTimeGetSeconds(asset.duration)
-        guard durationSeconds.isFinite, durationSeconds > 0 else {
-            throw WaveformError.invalidDuration
-        }
-
-        let totalFrames = Int64(durationSeconds * sampleRate)
-        guard totalFrames > 0 else { return [] }
-
-        let maxTarget = Int(min(totalFrames, Int64(Int.max)))
-        let clampedTarget = max(1, min(targetSamples, maxTarget))
-        let framesPerSample = Double(totalFrames) / Double(clampedTarget)
-
-        // Request mono output for simpler FFT processing
-        let outputSettings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: sampleRate,
-            AVNumberOfChannelsKey: 1,
-            AVLinearPCMBitDepthKey: 32,
-            AVLinearPCMIsFloatKey: true,
-            AVLinearPCMIsNonInterleaved: true
-        ]
-
-        let reader = try AVAssetReader(asset: asset)
-        let output = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: outputSettings)
-        output.alwaysCopiesSampleData = false
-        guard reader.canAdd(output) else {
-            throw WaveformError.assetReaderFailed
-        }
-        reader.add(output)
-        guard reader.startReading() else {
-            throw reader.error ?? WaveformError.assetReaderFailed
-        }
-
-        // FFT setup
-        let log2n = vDSP_Length(log2(Float(fftSize)))
-        guard let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(FFT_RADIX2)) else {
-            return []
-        }
-        defer { vDSP_destroy_fftsetup(fftSetup) }
-
-        var hannWindow = [Float](repeating: 0, count: fftSize)
-        vDSP_hann_window(&hannWindow, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
-
-        let sampleRateF = Float(sampleRate)
-        
-        // Accumulation buffer for FFT
-        var fftBuffer = [Float](repeating: 0, count: fftSize)
-        var fftBufferPos = 0
-        var samples = [Float](repeating: 0, count: clampedTarget)
-        var currentSample = 0
-        var currentBassEnergy: Float = 0
-        var fftCountInSample = 0
-        var frameIndex: Int64 = 0
-
-        while reader.status == .reading {
-            guard let sampleBuffer = output.copyNextSampleBuffer() else { break }
-            let frameCount = CMSampleBufferGetNumSamples(sampleBuffer)
-            if frameCount == 0 { continue }
-
-            let didProcess = withAudioBufferList(from: sampleBuffer) { bufferList in
-                guard bufferList.count >= 1, let data = bufferList[0].mData else { return false }
-                let floatData = data.assumingMemoryBound(to: Float.self)
-
-                for frame in 0..<frameCount {
-                    fftBuffer[fftBufferPos] = floatData[frame]
-                    fftBufferPos += 1
-
-                    if fftBufferPos >= fftSize {
-                        let energy = bassEnergy(
-                            from: fftBuffer, count: fftSize,
-                            fftSetup: fftSetup, window: hannWindow,
-                            sampleRate: sampleRateF
-                        )
-                        currentBassEnergy += energy
-                        fftCountInSample += 1
-                        fftBufferPos = 0
-                    }
-
-                    frameIndex += 1
-                    let sampleIndex = Int(Double(frameIndex) / framesPerSample)
-                    if sampleIndex > currentSample {
-                        if fftBufferPos > 0 {
-                            for i in fftBufferPos..<fftSize { fftBuffer[i] = 0 }
-                            let energy = bassEnergy(
-                                from: fftBuffer, count: fftBufferPos,
-                                fftSetup: fftSetup, window: hannWindow,
-                                sampleRate: sampleRateF
-                            )
-                            currentBassEnergy += energy
-                            fftCountInSample += 1
-                            fftBufferPos = 0
-                        }
-                        samples[currentSample] = fftCountInSample > 0
-                            ? currentBassEnergy / Float(fftCountInSample) : 0
-                        currentBassEnergy = 0
-                        fftCountInSample = 0
-                        currentSample = min(sampleIndex, clampedTarget - 1)
-                    }
-                }
-                return true
-            }
-
-            if !didProcess { continue }
-        }
-
-        if currentSample < samples.count {
-            if fftBufferPos > 0 {
-                for i in fftBufferPos..<fftSize { fftBuffer[i] = 0 }
-                let energy = bassEnergy(
-                    from: fftBuffer, count: fftBufferPos,
-                    fftSetup: fftSetup, window: hannWindow,
-                    sampleRate: sampleRateF
-                )
-                currentBassEnergy += energy
-                fftCountInSample += 1
-            }
-            samples[currentSample] = fftCountInSample > 0
-                ? currentBassEnergy / Float(fftCountInSample) : 0
-        }
-
-        if reader.status == .failed || reader.status == .cancelled {
-            throw reader.error ?? WaveformError.assetReaderFailed
-        }
-
-        normalize(&samples)
-        return samples
-    }
-
     // MARK: - Spectrogram Analysis
 
-    static func analyzeSpectrogram(url: URL, targetColumns: Int = 2000, freqBins: Int = 128) throws -> [[Float]] {
-        do {
-            return try spectrogramWithAudioFile(url: url, targetColumns: targetColumns, freqBins: freqBins)
-        } catch {
-            return try spectrogramWithAssetReader(url: url, targetColumns: targetColumns, freqBins: freqBins)
-        }
+    nonisolated static func analyzeSpectrogram(url: URL, targetColumns: Int = 2000, freqBins: Int = 128) throws -> [[Float]] {
+        try spectrogramWithAudioFile(url: url, targetColumns: targetColumns, freqBins: freqBins)
     }
 
     /// Build a mel-scale triangular filterbank matrix.
@@ -1045,35 +764,23 @@ enum WaveformAnalyzer {
     }
 
     private static func spectrogramWithAudioFile(url: URL, targetColumns: Int, freqBins: Int) throws -> [[Float]] {
-        let audioFile = try AVAudioFile(forReading: url)
-        let inputFormat = audioFile.processingFormat
-        guard let outputFormat = AVAudioFormat(
-            standardFormatWithSampleRate: inputFormat.sampleRate, channels: 1
-        ) else { throw WaveformError.conversionFailed }
-        guard let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
-            throw WaveformError.conversionFailed
-        }
-
-        let totalFrames = max(Int64(audioFile.length), 0)
+        let decoder = try MonoPCMDecoder(url: url)
+        let totalFrames = decoder.totalFrames
         guard totalFrames > 0 else { return [] }
 
         let clampedTarget = max(1, min(targetColumns, Int(min(totalFrames, Int64(Int.max)))))
         let framesPerColumn = Double(totalFrames) / Double(clampedTarget)
-        let bufferSize: AVAudioFrameCount = 4096
-
-        guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: bufferSize),
-              let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: bufferSize) else {
-            return []
-        }
 
         let log2n = vDSP_Length(log2(Float(fftSize)))
-        guard let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(FFT_RADIX2)) else { return [] }
+        guard let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(FFT_RADIX2)) else {
+            throw WaveformError.fftSetupFailed
+        }
         defer { vDSP_destroy_fftsetup(fftSetup) }
 
         var hannWindow = [Float](repeating: 0, count: fftSize)
         vDSP_hann_window(&hannWindow, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
 
-        let sampleRate = Float(outputFormat.sampleRate)
+        let sampleRate = decoder.sampleRate
         let halfN = fftSize / 2
         let filterbank = buildMelFilterbank(freqBins: freqBins, halfN: halfN, sampleRate: sampleRate)
 
@@ -1085,50 +792,43 @@ enum WaveformAnalyzer {
         var currentMelSum = [Float](repeating: 0, count: freqBins)
         var fftCountInColumn = 0
         var frameIndex: Int64 = 0
-        var isEOF = false
-        var readError: Error?
 
-        let inputBlock: AVAudioConverterInputBlock = { inNumFrames, outStatus in
-            if isEOF { outStatus.pointee = .endOfStream; return nil }
-            do {
-                try audioFile.read(into: inputBuffer, frameCount: min(inNumFrames, inputBuffer.frameCapacity))
-            } catch {
-                readError = error; outStatus.pointee = .endOfStream; isEOF = true; return nil
-            }
-            if inputBuffer.frameLength == 0 { outStatus.pointee = .endOfStream; isEOF = true; return nil }
-            outStatus.pointee = .haveData
-            return inputBuffer
-        }
-
-        while !isEOF {
-            outputBuffer.frameLength = 0
-            var conversionError: NSError?
-            let status = converter.convert(to: outputBuffer, error: &conversionError, withInputFrom: inputBlock)
-            if let readError { throw readError }
-            if status == .error { throw conversionError ?? WaveformError.conversionFailed }
-
-            let frameLength = Int(outputBuffer.frameLength)
-            if frameLength == 0 { continue }
-            guard let channelData = outputBuffer.floatChannelData else { continue }
-            let monoData = channelData[0]
-
+        try decoder.decode { monoData, frameLength in
             for frame in 0..<frameLength {
+                if frame.isMultiple(of: 1024) {
+                    try Task.checkCancellation()
+                }
+
                 fftBuffer[fftBufferPos] = monoData[frame]
                 fftBufferPos += 1
 
                 if fftBufferPos >= fftSize {
-                    let mel = melSpectrum(from: fftBuffer, count: fftSize, fftSetup: fftSetup, window: hannWindow, filterbank: filterbank, freqBins: freqBins)
+                    let mel = melSpectrum(
+                        from: fftBuffer,
+                        count: fftSize,
+                        fftSetup: fftSetup,
+                        window: hannWindow,
+                        filterbank: filterbank,
+                        freqBins: freqBins
+                    )
                     vDSP_vadd(currentMelSum, 1, mel, 1, &currentMelSum, 1, vDSP_Length(freqBins))
                     fftCountInColumn += 1
                     fftBufferPos = 0
                 }
 
                 frameIndex += 1
-                let colIndex = Int(Double(frameIndex) / framesPerColumn)
-                if colIndex > currentColumn {
+                let columnIndex = Int(Double(frameIndex) / framesPerColumn)
+                if columnIndex > currentColumn {
                     if fftBufferPos > 0 {
-                        for i in fftBufferPos..<fftSize { fftBuffer[i] = 0 }
-                        let mel = melSpectrum(from: fftBuffer, count: fftBufferPos, fftSetup: fftSetup, window: hannWindow, filterbank: filterbank, freqBins: freqBins)
+                        for index in fftBufferPos..<fftSize { fftBuffer[index] = 0 }
+                        let mel = melSpectrum(
+                            from: fftBuffer,
+                            count: fftBufferPos,
+                            fftSetup: fftSetup,
+                            window: hannWindow,
+                            filterbank: filterbank,
+                            freqBins: freqBins
+                        )
                         vDSP_vadd(currentMelSum, 1, mel, 1, &currentMelSum, 1, vDSP_Length(freqBins))
                         fftCountInColumn += 1
                         fftBufferPos = 0
@@ -1139,16 +839,22 @@ enum WaveformAnalyzer {
                     }
                     currentMelSum = [Float](repeating: 0, count: freqBins)
                     fftCountInColumn = 0
-                    currentColumn = min(colIndex, clampedTarget - 1)
+                    currentColumn = min(columnIndex, clampedTarget - 1)
                 }
             }
         }
 
-        // Flush final column
         if currentColumn < columns.count {
             if fftBufferPos > 0 {
-                for i in fftBufferPos..<fftSize { fftBuffer[i] = 0 }
-                let mel = melSpectrum(from: fftBuffer, count: fftBufferPos, fftSetup: fftSetup, window: hannWindow, filterbank: filterbank, freqBins: freqBins)
+                for index in fftBufferPos..<fftSize { fftBuffer[index] = 0 }
+                let mel = melSpectrum(
+                    from: fftBuffer,
+                    count: fftBufferPos,
+                    fftSetup: fftSetup,
+                    window: hannWindow,
+                    filterbank: filterbank,
+                    freqBins: freqBins
+                )
                 vDSP_vadd(currentMelSum, 1, mel, 1, &currentMelSum, 1, vDSP_Length(freqBins))
                 fftCountInColumn += 1
             }
@@ -1156,135 +862,6 @@ enum WaveformAnalyzer {
                 var divisor = Float(fftCountInColumn)
                 vDSP_vsdiv(currentMelSum, 1, &divisor, &columns[currentColumn], 1, vDSP_Length(freqBins))
             }
-        }
-
-        normalizeSpectrogram(&columns)
-        return columns
-    }
-
-    private static func spectrogramWithAssetReader(url: URL, targetColumns: Int, freqBins: Int) throws -> [[Float]] {
-        let asset = AVURLAsset(url: url)
-        guard let audioTrack = asset.tracks(withMediaType: .audio).first else { return [] }
-        guard let firstDesc = audioTrack.formatDescriptions.first else {
-            throw WaveformError.assetReaderFailed
-        }
-        let formatDesc = firstDesc as! CMAudioFormatDescription
-        guard let asbdPointer = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) else {
-            throw WaveformError.assetReaderFailed
-        }
-
-        let asbd = asbdPointer.pointee
-        let sampleRate = asbd.mSampleRate
-        guard sampleRate > 0, asbd.mChannelsPerFrame > 0 else {
-            throw WaveformError.assetReaderFailed
-        }
-
-        let durationSeconds = CMTimeGetSeconds(asset.duration)
-        guard durationSeconds.isFinite, durationSeconds > 0 else {
-            throw WaveformError.invalidDuration
-        }
-
-        let totalFrames = Int64(durationSeconds * sampleRate)
-        guard totalFrames > 0 else { return [] }
-
-        let clampedTarget = max(1, min(targetColumns, Int(min(totalFrames, Int64(Int.max)))))
-        let framesPerColumn = Double(totalFrames) / Double(clampedTarget)
-
-        let outputSettings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: sampleRate,
-            AVNumberOfChannelsKey: 1,
-            AVLinearPCMBitDepthKey: 32,
-            AVLinearPCMIsFloatKey: true,
-            AVLinearPCMIsNonInterleaved: true
-        ]
-
-        let reader = try AVAssetReader(asset: asset)
-        let output = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: outputSettings)
-        output.alwaysCopiesSampleData = false
-        guard reader.canAdd(output) else { throw WaveformError.assetReaderFailed }
-        reader.add(output)
-        guard reader.startReading() else { throw reader.error ?? WaveformError.assetReaderFailed }
-
-        let log2n = vDSP_Length(log2(Float(fftSize)))
-        guard let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(FFT_RADIX2)) else { return [] }
-        defer { vDSP_destroy_fftsetup(fftSetup) }
-
-        var hannWindow = [Float](repeating: 0, count: fftSize)
-        vDSP_hann_window(&hannWindow, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
-
-        let sampleRateF = Float(sampleRate)
-        let halfN = fftSize / 2
-        let filterbank = buildMelFilterbank(freqBins: freqBins, halfN: halfN, sampleRate: sampleRateF)
-
-        var fftBuffer = [Float](repeating: 0, count: fftSize)
-        var fftBufferPos = 0
-
-        var columns = [[Float]](repeating: [Float](repeating: 0, count: freqBins), count: clampedTarget)
-        var currentColumn = 0
-        var currentMelSum = [Float](repeating: 0, count: freqBins)
-        var fftCountInColumn = 0
-        var frameIndex: Int64 = 0
-
-        while reader.status == .reading {
-            guard let sampleBuffer = output.copyNextSampleBuffer() else { break }
-            let frameCount = CMSampleBufferGetNumSamples(sampleBuffer)
-            if frameCount == 0 { continue }
-
-            let didProcess = withAudioBufferList(from: sampleBuffer) { bufferList in
-                guard bufferList.count >= 1, let data = bufferList[0].mData else { return false }
-                let floatData = data.assumingMemoryBound(to: Float.self)
-
-                for frame in 0..<frameCount {
-                    fftBuffer[fftBufferPos] = floatData[frame]
-                    fftBufferPos += 1
-
-                    if fftBufferPos >= fftSize {
-                        let mel = melSpectrum(from: fftBuffer, count: fftSize, fftSetup: fftSetup, window: hannWindow, filterbank: filterbank, freqBins: freqBins)
-                        vDSP_vadd(currentMelSum, 1, mel, 1, &currentMelSum, 1, vDSP_Length(freqBins))
-                        fftCountInColumn += 1
-                        fftBufferPos = 0
-                    }
-
-                    frameIndex += 1
-                    let colIndex = Int(Double(frameIndex) / framesPerColumn)
-                    if colIndex > currentColumn {
-                        if fftBufferPos > 0 {
-                            for i in fftBufferPos..<fftSize { fftBuffer[i] = 0 }
-                            let mel = melSpectrum(from: fftBuffer, count: fftBufferPos, fftSetup: fftSetup, window: hannWindow, filterbank: filterbank, freqBins: freqBins)
-                            vDSP_vadd(currentMelSum, 1, mel, 1, &currentMelSum, 1, vDSP_Length(freqBins))
-                            fftCountInColumn += 1
-                            fftBufferPos = 0
-                        }
-                        if fftCountInColumn > 0 {
-                            var divisor = Float(fftCountInColumn)
-                            vDSP_vsdiv(currentMelSum, 1, &divisor, &columns[currentColumn], 1, vDSP_Length(freqBins))
-                        }
-                        currentMelSum = [Float](repeating: 0, count: freqBins)
-                        fftCountInColumn = 0
-                        currentColumn = min(colIndex, clampedTarget - 1)
-                    }
-                }
-                return true
-            }
-            if !didProcess { continue }
-        }
-
-        if currentColumn < columns.count {
-            if fftBufferPos > 0 {
-                for i in fftBufferPos..<fftSize { fftBuffer[i] = 0 }
-                let mel = melSpectrum(from: fftBuffer, count: fftBufferPos, fftSetup: fftSetup, window: hannWindow, filterbank: filterbank, freqBins: freqBins)
-                vDSP_vadd(currentMelSum, 1, mel, 1, &currentMelSum, 1, vDSP_Length(freqBins))
-                fftCountInColumn += 1
-            }
-            if fftCountInColumn > 0 {
-                var divisor = Float(fftCountInColumn)
-                vDSP_vsdiv(currentMelSum, 1, &divisor, &columns[currentColumn], 1, vDSP_Length(freqBins))
-            }
-        }
-
-        if reader.status == .failed || reader.status == .cancelled {
-            throw reader.error ?? WaveformError.assetReaderFailed
         }
 
         normalizeSpectrogram(&columns)
@@ -1388,7 +965,7 @@ enum WaveformAnalyzer {
 
     // MARK: - Audio Quality Analysis
 
-    struct QualityDebugInfo {
+    struct QualityDebugInfo: Sendable {
         let medianRel16k: Float
         let medianRel17k: Float
         let medianRel18k: Float
@@ -1397,43 +974,22 @@ enum WaveformAnalyzer {
         let totalFrames: Int
     }
 
-    static func analyzeQuality(url: URL) throws -> (AudioQualityResult, QualityDebugInfo) {
-        do {
-            return try qualityWithAudioFile(url: url)
-        } catch {
-            return try qualityWithAssetReader(url: url)
-        }
+    nonisolated static func analyzeQuality(url: URL) throws -> (AudioQualityResult, QualityDebugInfo) {
+        try qualityWithAudioFile(url: url)
     }
 
     private static func qualityWithAudioFile(url: URL) throws -> (AudioQualityResult, QualityDebugInfo) {
-        let audioFile = try AVAudioFile(forReading: url)
-        let inputFormat = audioFile.processingFormat
-        let sampleRate = Float(inputFormat.sampleRate)
+        let decoder = try MonoPCMDecoder(url: url)
+        let sampleRate = decoder.sampleRate
         guard sampleRate > 0 else { throw WaveformError.conversionFailed }
+        guard decoder.totalFrames > 0 else { throw WaveformError.invalidDuration }
 
-        guard let outputFormat = AVAudioFormat(
-            standardFormatWithSampleRate: inputFormat.sampleRate, channels: 1
-        ) else { throw WaveformError.conversionFailed }
-        guard let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
-            throw WaveformError.conversionFailed
-        }
-
-        let totalFrames = max(Int64(audioFile.length), 0)
-        guard totalFrames > 0 else { throw WaveformError.invalidDuration }
-
-        // Sample every ~0.5s worth of frames
         let framesPerWindow = Int64(fftSize)
         let hopFrames = max(framesPerWindow, Int64(sampleRate * 0.5))
-        let bufferSize: AVAudioFrameCount = 4096
-
-        guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: bufferSize),
-              let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: bufferSize) else {
-            throw WaveformError.conversionFailed
-        }
 
         let log2n = vDSP_Length(log2(Float(fftSize)))
         guard let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(FFT_RADIX2)) else {
-            throw WaveformError.conversionFailed
+            throw WaveformError.fftSetupFailed
         }
         defer { vDSP_destroy_fftsetup(fftSetup) }
 
@@ -1444,44 +1000,24 @@ enum WaveformAnalyzer {
         var fftBufferPos = 0
         var frameIndex: Int64 = 0
         var nextAnalysisFrame: Int64 = 0
-        var isEOF = false
-        var readError: Error?
-
         var accumulator = QualityAccumulator(sampleRate: sampleRate)
 
-        let inputBlock: AVAudioConverterInputBlock = { inNumFrames, outStatus in
-            if isEOF { outStatus.pointee = .endOfStream; return nil }
-            do {
-                try audioFile.read(into: inputBuffer, frameCount: min(inNumFrames, inputBuffer.frameCapacity))
-            } catch {
-                readError = error; outStatus.pointee = .endOfStream; isEOF = true; return nil
-            }
-            if inputBuffer.frameLength == 0 { outStatus.pointee = .endOfStream; isEOF = true; return nil }
-            outStatus.pointee = .haveData
-            return inputBuffer
-        }
-
-        while !isEOF {
-            outputBuffer.frameLength = 0
-            var conversionError: NSError?
-            let status = converter.convert(to: outputBuffer, error: &conversionError, withInputFrom: inputBlock)
-            if let readError { throw readError }
-            if status == .error { throw conversionError ?? WaveformError.conversionFailed }
-
-            let frameLength = Int(outputBuffer.frameLength)
-            if frameLength == 0 { continue }
-            guard let channelData = outputBuffer.floatChannelData else { continue }
-            let monoData = channelData[0]
-
+        try decoder.decode { monoData, frameLength in
             for frame in 0..<frameLength {
+                if frame.isMultiple(of: 1024) {
+                    try Task.checkCancellation()
+                }
+
                 if frameIndex >= nextAnalysisFrame {
                     fftBuffer[fftBufferPos] = monoData[frame]
                     fftBufferPos += 1
 
                     if fftBufferPos >= fftSize {
                         let spectrum = rawMagnitudeSpectrumDB(
-                            from: fftBuffer, count: fftSize,
-                            fftSetup: fftSetup, window: hannWindow
+                            from: fftBuffer,
+                            count: fftSize,
+                            fftSetup: fftSetup,
+                            window: hannWindow
                         )
                         accumulator.processFrame(spectrum)
                         fftBufferPos = 0
@@ -1490,99 +1026,6 @@ enum WaveformAnalyzer {
                 }
                 frameIndex += 1
             }
-        }
-
-        return accumulator.classify()
-    }
-
-    private static func qualityWithAssetReader(url: URL) throws -> (AudioQualityResult, QualityDebugInfo) {
-        let asset = AVURLAsset(url: url)
-        guard let audioTrack = asset.tracks(withMediaType: .audio).first else {
-            throw WaveformError.assetReaderFailed
-        }
-        guard let firstDesc = audioTrack.formatDescriptions.first else {
-            throw WaveformError.assetReaderFailed
-        }
-        let formatDesc = firstDesc as! CMAudioFormatDescription
-        guard let asbdPointer = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) else {
-            throw WaveformError.assetReaderFailed
-        }
-        let asbd = asbdPointer.pointee
-        let sampleRate = Float(asbd.mSampleRate)
-        guard sampleRate > 0, asbd.mChannelsPerFrame > 0 else {
-            throw WaveformError.assetReaderFailed
-        }
-
-        let durationSeconds = CMTimeGetSeconds(asset.duration)
-        guard durationSeconds.isFinite, durationSeconds > 0 else {
-            throw WaveformError.invalidDuration
-        }
-
-        let outputSettings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: asbd.mSampleRate,
-            AVNumberOfChannelsKey: 1,
-            AVLinearPCMBitDepthKey: 32,
-            AVLinearPCMIsFloatKey: true,
-            AVLinearPCMIsNonInterleaved: true
-        ]
-
-        let reader = try AVAssetReader(asset: asset)
-        let output = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: outputSettings)
-        output.alwaysCopiesSampleData = false
-        guard reader.canAdd(output) else { throw WaveformError.assetReaderFailed }
-        reader.add(output)
-        guard reader.startReading() else { throw reader.error ?? WaveformError.assetReaderFailed }
-
-        let log2n = vDSP_Length(log2(Float(fftSize)))
-        guard let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(FFT_RADIX2)) else {
-            throw WaveformError.assetReaderFailed
-        }
-        defer { vDSP_destroy_fftsetup(fftSetup) }
-
-        var hannWindow = [Float](repeating: 0, count: fftSize)
-        vDSP_hann_window(&hannWindow, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
-
-        let hopFrames = max(Int64(fftSize), Int64(sampleRate * 0.5))
-        var fftBuffer = [Float](repeating: 0, count: fftSize)
-        var fftBufferPos = 0
-        var frameIndex: Int64 = 0
-        var nextAnalysisFrame: Int64 = 0
-
-        var accumulator = QualityAccumulator(sampleRate: sampleRate)
-
-        while reader.status == .reading {
-            guard let sampleBuffer = output.copyNextSampleBuffer() else { break }
-            let frameCount = CMSampleBufferGetNumSamples(sampleBuffer)
-            if frameCount == 0 { continue }
-
-            let _ = withAudioBufferList(from: sampleBuffer) { bufferList in
-                guard bufferList.count >= 1, let data = bufferList[0].mData else { return false }
-                let floatData = data.assumingMemoryBound(to: Float.self)
-
-                for frame in 0..<frameCount {
-                    if frameIndex >= nextAnalysisFrame {
-                        fftBuffer[fftBufferPos] = floatData[frame]
-                        fftBufferPos += 1
-
-                        if fftBufferPos >= fftSize {
-                            let spectrum = rawMagnitudeSpectrumDB(
-                                from: fftBuffer, count: fftSize,
-                                fftSetup: fftSetup, window: hannWindow
-                            )
-                            accumulator.processFrame(spectrum)
-                            fftBufferPos = 0
-                            nextAnalysisFrame = frameIndex + hopFrames
-                        }
-                    }
-                    frameIndex += 1
-                }
-                return true
-            }
-        }
-
-        if reader.status == .failed || reader.status == .cancelled {
-            throw reader.error ?? WaveformError.assetReaderFailed
         }
 
         return accumulator.classify()
@@ -1768,42 +1211,4 @@ enum WaveformAnalyzer {
         }
     }
 
-    private static func withAudioBufferList(from sampleBuffer: CMSampleBuffer,
-                                            _ body: (UnsafeMutableAudioBufferListPointer) -> Bool) -> Bool {
-        var bufferListSizeNeeded: Int = 0
-        var blockBuffer: CMBlockBuffer?
-        let sizeStatus = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-            sampleBuffer,
-            bufferListSizeNeededOut: &bufferListSizeNeeded,
-            bufferListOut: nil,
-            bufferListSize: 0,
-            blockBufferAllocator: nil,
-            blockBufferMemoryAllocator: nil,
-            flags: 0,
-            blockBufferOut: &blockBuffer
-        )
-        guard sizeStatus == noErr else { return false }
-
-        let bufferListPointer = UnsafeMutableRawPointer.allocate(
-            byteCount: bufferListSizeNeeded,
-            alignment: MemoryLayout<AudioBufferList>.alignment
-        )
-        defer { bufferListPointer.deallocate() }
-
-        let audioBufferList = bufferListPointer.bindMemory(to: AudioBufferList.self, capacity: 1)
-        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-            sampleBuffer,
-            bufferListSizeNeededOut: nil,
-            bufferListOut: audioBufferList,
-            bufferListSize: bufferListSizeNeeded,
-            blockBufferAllocator: nil,
-            blockBufferMemoryAllocator: nil,
-            flags: 0,
-            blockBufferOut: &blockBuffer
-        )
-        guard status == noErr else { return false }
-
-        let bufferPointer = UnsafeMutableAudioBufferListPointer(audioBufferList)
-        return body(bufferPointer)
-    }
 }
