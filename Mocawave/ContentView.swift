@@ -660,21 +660,6 @@ struct PlayPauseButton: View {
     }
 }
 
-struct ProBadgeView: View {
-    var body: some View {
-        Text("PRO")
-            .font(.system(size: 7, weight: .bold, design: .monospaced))
-            .foregroundColor(Color.orange.opacity(0.92))
-            .padding(.horizontal, 3)
-            .padding(.vertical, 1)
-            .background(Color.orange.opacity(0.12))
-            .overlay(
-                Rectangle()
-                    .stroke(Color.orange.opacity(0.4), lineWidth: 1)
-            )
-    }
-}
-
 struct TopBarDividerView: View {
     var body: some View {
         Rectangle()
@@ -683,8 +668,6 @@ struct TopBarDividerView: View {
             .padding(.vertical, 4)
     }
 }
-
-private let lockedProParameterOpacity = 0.78
 
 struct TopBarValueCell: View {
     let title: String
@@ -712,10 +695,6 @@ struct TopBarMeterCell: View {
     let label: String
     let value: String
     let normalizedLevel: Double?
-    let isLocked: Bool
-    let action: (() -> Void)?
-
-    @State private var isHovered = false
 
     private var displayLevel: Double {
         guard let normalizedLevel else { return 0 }
@@ -723,23 +702,6 @@ struct TopBarMeterCell: View {
     }
 
     var body: some View {
-        Group {
-            if let action {
-                Button(action: action) {
-                    cellBody
-                }
-                .buttonStyle(.plain)
-                .onHover { hovering in
-                    isHovered = hovering
-                }
-                .help(isLocked ? "Unlock Pro to access \(label)." : label)
-            } else {
-                cellBody
-            }
-        }
-    }
-
-    private var cellBody: some View {
         HStack {
             ZStack(alignment: .leading) {
                 RoundedRectangle(cornerRadius: 2)
@@ -747,27 +709,23 @@ struct TopBarMeterCell: View {
 
                 GeometryReader { proxy in
                     RoundedRectangle(cornerRadius: 2)
-                        .fill(Color.white.opacity(isLocked ? 0.24 : 0.52))
+                        .fill(Color.white.opacity(0.52))
                         .frame(width: proxy.size.width * displayLevel)
                 }
 
                 HStack(spacing: 4) {
                     Text(label)
                         .font(.system(size: 7, weight: .semibold, design: .monospaced))
-                        .foregroundColor(.white.opacity(isLocked ? 0.52 : 0.72))
+                        .foregroundColor(.white.opacity(0.72))
                         .lineLimit(1)
 
                     Spacer(minLength: 0)
 
                     Text(value)
                         .font(.system(size: 8, weight: .bold, design: .monospaced))
-                        .foregroundColor(.white.opacity(isLocked ? 0.62 : 0.92))
+                        .foregroundColor(.white.opacity(0.92))
                         .lineLimit(1)
                         .minimumScaleFactor(0.68)
-
-                    if isLocked {
-                        ProBadgeView()
-                    }
                 }
                 .padding(.horizontal, 4)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -780,39 +738,13 @@ struct TopBarMeterCell: View {
         }
         .padding(.horizontal, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .background(
-            Rectangle()
-                .fill(Color.white.opacity(isHovered ? 0.05 : 0))
-        )
-        .opacity(isLocked ? lockedProParameterOpacity : 1)
     }
 }
 
 struct TopBarQualityCell: View {
     let value: String
-    let isLocked: Bool
-    let action: (() -> Void)?
-
-    @State private var isHovered = false
 
     var body: some View {
-        Group {
-            if let action {
-                Button(action: action) {
-                    cellBody
-                }
-                .buttonStyle(.plain)
-                .onHover { hovering in
-                    isHovered = hovering
-                }
-                .help(isLocked ? "Unlock Pro to access quality analysis." : "Quality analysis")
-            } else {
-                cellBody
-            }
-        }
-    }
-
-    private var cellBody: some View {
         HStack(spacing: 5) {
             Text("REAL QUALITY")
                 .font(.system(size: 8, weight: .semibold, design: .monospaced))
@@ -821,27 +753,17 @@ struct TopBarQualityCell: View {
 
             Text(value)
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .foregroundColor(.white.opacity(isLocked ? 0.5 : 0.9))
+                .foregroundColor(.white.opacity(0.9))
                 .lineLimit(1)
                 .minimumScaleFactor(0.72)
-
-            if isLocked {
-                ProBadgeView()
-            }
         }
         .padding(.horizontal, 8)
         .frame(minWidth: 155, maxHeight: .infinity, alignment: .leading)
-        .background(
-            Rectangle()
-                .fill(Color.white.opacity(isHovered ? 0.05 : 0))
-        )
-        .opacity(isLocked ? lockedProParameterOpacity : 1)
     }
 }
 
 struct TopBarWaveformToggleCell: View {
     let isOn: Bool
-    let isLocked: Bool
     let action: () -> Void
 
     @State private var isHovered = false
@@ -855,12 +777,8 @@ struct TopBarWaveformToggleCell: View {
 
                 Text("RGB WAVE")
                     .font(.system(size: 8, weight: .semibold, design: .monospaced))
-                    .foregroundColor(.white.opacity(isLocked ? 0.52 : 0.86))
+                    .foregroundColor(.white.opacity(0.86))
                     .lineLimit(1)
-
-                if isLocked {
-                    ProBadgeView()
-                }
             }
             .padding(.horizontal, 8)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
@@ -874,14 +792,11 @@ struct TopBarWaveformToggleCell: View {
         .onHover { hovering in
             isHovered = hovering
         }
-        .help(isLocked ? "Unlock Pro to enable colored waveform." : "Toggle colored waveform")
+        .help("Toggle colored waveform")
     }
 
     private var iconColor: Color {
-        if isLocked {
-            return Color.white.opacity(0.42)
-        }
-        return isOn ? Color.accentColor : Color.white.opacity(0.72)
+        isOn ? Color.accentColor : Color.white.opacity(0.72)
     }
 }
 
@@ -913,14 +828,12 @@ struct TopBarInstagramCell: View {
 }
 
 struct ContentView: View {
-    @EnvironmentObject private var proStore: ProEntitlementStore
     @StateObject private var viewModel: AudioPlayerViewModel
     @State private var isDropTargeted = false
     @State private var isImportingAudio = false
     @State private var keyMonitor: Any?
     @State private var windowRef: NSWindow?
     @State private var showDebugWindow = false
-    @State private var activeProPaywallSource: ProPaywallSource?
     private let seekStep: TimeInterval = 5
     private static let controlRowSpacing: CGFloat = 12
     private static let topBarHeight: CGFloat = 22
@@ -1117,18 +1030,11 @@ struct ContentView: View {
         }
         .onAppear {
             installKeyMonitor()
-            viewModel.handleProAccessChanged()
         }
         .onDisappear {
             removeKeyMonitor()
             if let windowRef {
                 AudioOpenCoordinator.shared.unregister(window: windowRef)
-            }
-        }
-        .onChange(of: proStore.effectiveProAccess) { hasAccess in
-            viewModel.handleProAccessChanged()
-            if hasAccess {
-                activeProPaywallSource = nil
             }
         }
         .onChange(of: viewModel.fileName) { newName in
@@ -1143,50 +1049,29 @@ struct ContentView: View {
         .sheet(isPresented: $showDebugWindow) {
             DebugWindow(viewModel: viewModel)
         }
-        .sheet(item: $activeProPaywallSource) { source in
-            ProPaywallSheet(source: source)
-                .environmentObject(proStore)
-        }
     }
 
     private var topBar: some View {
-        let isProLocked = !proStore.effectiveProAccess
-
-        return HStack(spacing: 0) {
+        HStack(spacing: 0) {
             TopBarMeterCell(
                 label: "LUFS",
                 value: lufsDisplayText(viewModel: viewModel),
-                normalizedLevel: normalizedLUFSLevel(viewModel: viewModel),
-                isLocked: isProLocked,
-                action: isProLocked ? { presentPaywall(.lufs) } : nil
+                normalizedLevel: normalizedLUFSLevel(viewModel: viewModel)
             )
             .frame(width: 112)
             TopBarDividerView()
             TopBarMeterCell(
                 label: "dB",
                 value: volumeDisplayText(viewModel: viewModel),
-                normalizedLevel: normalizedVolumeLevel(viewModel: viewModel),
-                isLocked: isProLocked,
-                action: isProLocked ? { presentPaywall(.peakMeter) } : nil
+                normalizedLevel: normalizedVolumeLevel(viewModel: viewModel)
             )
             .frame(width: 104)
             TopBarDividerView()
-            TopBarQualityCell(
-                value: qualityDisplayText(viewModel: viewModel),
-                isLocked: isProLocked,
-                action: isProLocked ? { presentPaywall(.quality) } : nil
-            )
+            TopBarQualityCell(value: qualityDisplayText(viewModel: viewModel))
             TopBarDividerView()
             TopBarWaveformToggleCell(
                 isOn: viewModel.showColoredWaveform,
-                isLocked: viewModel.isColoredWaveformLocked,
-                action: {
-                    if viewModel.isColoredWaveformLocked {
-                        presentPaywall(.coloredWaveform)
-                    } else {
-                        viewModel.toggleColoredWaveform()
-                    }
-                }
+                action: { viewModel.toggleColoredWaveform() }
             )
             .frame(minWidth: 103)
             TopBarDividerView()
@@ -1208,10 +1093,6 @@ struct ContentView: View {
                 .stroke(Color.white.opacity(0.12), lineWidth: 1)
         )
         .clipShape(Rectangle())
-    }
-
-    private func presentPaywall(_ source: ProPaywallSource) {
-        activeProPaywallSource = source
     }
 
     private func applyWindowStyle(_ window: NSWindow) {

@@ -1,6 +1,6 @@
 # Mocawave
 
-Mocawave is a macOS audio player and analyzer built with SwiftUI, AppKit, AVFoundation, Accelerate, and StoreKit. It opens local audio files, plays them back, renders waveform/spectrogram views, estimates BPM and musical key, and exposes Pro-only analysis such as RGB waveform, LUFS, peak dB, and quality estimation.
+Mocawave is a macOS audio player and analyzer built with SwiftUI, AppKit, AVFoundation, and Accelerate. It opens local audio files, plays them back, renders waveform/spectrogram views, estimates BPM and musical key, and provides RGB waveform, LUFS, peak dB, and quality estimation. All features are free.
 
 Supported audio document types are configured in `App-Info.plist`: MP3, WAV, AAC, and M4A.
 
@@ -10,7 +10,6 @@ Supported audio document types are configured in `App-Info.plist`: MP3, WAV, AAC
 - UI: SwiftUI with small AppKit bridges where direct `NSWindow` or mouse tracking access is needed
 - Audio playback: `AVAudioEngine`, `AVAudioPlayerNode`, and `AVAudioFile`
 - DSP: Accelerate/vDSP FFT and vector operations
-- Purchases: StoreKit 2, product id `mocawave.pro.lifetime`
 - Cache: JSON cache in `Application Support/mocawave/audio_cache.json`
 - Tests: XCTest unit tests for waveform-analysis scheduling behavior
 
@@ -28,13 +27,11 @@ MocawaveApp
               -> WaveformAnalyzer
           -> BPMAnalyzer4 / KeyAnalyzer
           -> LUFSMeter
-      -> ProEntitlementStore
-          -> StoreKitProStoreBackend
 ```
 
 The high-level flow is:
 
-1. `MocawaveApp` starts the macOS app and injects `ProEntitlementStore`.
+1. `MocawaveApp` starts the macOS app and creates the main window.
 2. `ContentView` owns an `AudioPlayerViewModel` and renders the player UI.
 3. A user opens or drops an audio file.
 4. `AudioPlayerViewModel` validates the file, starts playback, keeps sandbox access alive, and starts/cancels analysis tasks.
@@ -48,7 +45,7 @@ The high-level flow is:
 
 | Component | Role |
 | --- | --- |
-| `MocawaveApp.swift` | App entry point. Configures AppKit activation, creates the main `WindowGroup`, prepares StoreKit state, and forwards Finder file-open events to `AudioOpenCoordinator`. |
+| `MocawaveApp.swift` | App entry point. Configures AppKit activation, creates the main `WindowGroup`, and forwards Finder file-open events to `AudioOpenCoordinator`. |
 | `App-Info.plist` | Bundle metadata and document type registration for supported audio files. |
 | `Mocawave.entitlements` | macOS sandbox entitlements. Allows read-only access to user-selected files. |
 | `WindowConfigurator.swift` | SwiftUI/AppKit bridge that exposes the underlying `NSWindow` for one-time window configuration. |
@@ -58,16 +55,15 @@ The high-level flow is:
 
 | Component | Role |
 | --- | --- |
-| `ContentView.swift` | Main player interface. Renders top-bar metrics, playback controls, waveform/spectrogram areas, Pro gates, debug window, drag-and-drop import, and fixed-height window behavior. |
+| `ContentView.swift` | Main player interface. Renders top-bar metrics, playback controls, waveform/spectrogram areas, debug window, drag-and-drop import, and fixed-height window behavior. |
 | `WaveformView.swift` | Waveform rendering primitives. Includes plain waveform, RGB waveform, pending/loading waveform views, resampling, mouse tracking, hover lines, and seek gestures. |
 | `SpectrogramView.swift` | Renders a `CGImage` spectrogram with played-region dimming, playhead, hover line, and seek gesture. |
-| `ProPaywallSheet.swift` | Pro upsell and purchase/restore UI. Uses `ProEntitlementStore` state and fallback product copy when App Store product loading is unavailable. |
 
 ### Playback and State
 
 | Component | Role |
 | --- | --- |
-| `AudioPlayerViewModel.swift` | Main orchestration layer. Opens files, manages `AVAudioEngine`, play/pause/seek state, analysis task lifecycle, real-time meters, cached analysis, Pro feature gating, and debug logs. It is `@MainActor` because it drives UI state. |
+| `AudioPlayerViewModel.swift` | Main orchestration layer. Opens files, manages `AVAudioEngine`, play/pause/seek state, analysis task lifecycle, real-time meters, cached analysis, and debug logs. It is `@MainActor` because it drives UI state. |
 | `LUFSMeter.swift` | Thread-safe real-time LUFS and peak dB meter. Processes buffers from an audio-engine tap and implements ITU-R BS.1770-style K-weighting with a short-term window. |
 | `AudioCache.swift` | Actor-backed persistent cache for waveform samples, BPM, key, quality, and RGB waveform data. Uses file size and modification date to validate entries. |
 
@@ -82,14 +78,6 @@ The high-level flow is:
 | `BPMAnalysis/EnsembleBPMAnalyzer.swift` | Alternative/legacy BPM analyzer using multiple onset and tempo-estimation strategies. |
 | `BPMAnalysis/StemBPMAnalyzer.swift` | Alternative/legacy BPM analyzer with stem/frequency-oriented processing helpers. |
 | `BPMAnalysis/librosa_bpm_analyzer.py` and `BPMAnalyzer3.py` | Python analyzer scripts retained as auxiliary/legacy BPM analysis resources. |
-
-### Pro and StoreKit
-
-| Component | Role |
-| --- | --- |
-| `ProEntitlementStore.swift` | StoreKit-facing entitlement model. Fetches products, observes transaction updates, checks current entitlements, purchases/restores Pro, and exposes UI-ready purchase state. |
-| `ProFeatures.swift` | Central Pro feature switch. Currently enables a development override through `developmentOverrideFlag`. |
-| `Mocawave Pro.storekit` | Local StoreKit configuration for testing the non-consumable Pro lifetime purchase. This is the file referenced by the shared Xcode scheme. |
 
 ### Assets and Tests
 
@@ -120,16 +108,6 @@ The high-level flow is:
 
 The coordinator prevents duplicate identical work and serializes expensive operations for the same file URL. When the user opens a different file or toggles features off, the view model cancels stale tasks and asks the coordinator to cancel matching URL-scoped work.
 
-### Pro Features
-
-Pro access is exposed through `ProEntitlementStore.effectiveProAccess`. The UI and view model use it to gate:
-
-- RGB waveform
-- LUFS and peak dB meters
-- audio quality analysis
-
-StoreKit is wrapped behind `ProStoreBackend`, which makes the entitlement store testable and allows `UnavailableProStoreBackend` to explain why StoreKit is unavailable when the app is not running as a real `.app` bundle.
-
 ## Development
 
 Open `Mocawave.xcodeproj` in Xcode and run the `Mocawave` scheme.
@@ -151,5 +129,4 @@ xcodebuild -project Mocawave.xcodeproj -scheme Mocawave test
 
 - Keep `AudioPlayerViewModel` focused on orchestration. Move new heavy DSP work into analyzer modules or actor-backed services.
 - Bump `AudioCache.cacheVersion` when cached analysis formats or algorithms change.
-- Keep Pro-gated state changes flowing through `ProEntitlementStore` and `ProFeatures`.
 - Avoid running expensive audio analysis directly on the main actor; route it through task/coordinator boundaries.

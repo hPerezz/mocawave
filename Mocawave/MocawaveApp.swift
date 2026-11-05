@@ -28,7 +28,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct MocawaveApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @StateObject private var proStore = ProEntitlementStore.shared
 
     init() {
         NSApplication.shared.setActivationPolicy(.regular)
@@ -40,10 +39,6 @@ struct MocawaveApp: App {
         // window to be spawned for the same file-open request on macOS.
         WindowGroup {
             ContentView()
-                .environmentObject(proStore)
-                .task {
-                    await proStore.prepareIfNeeded()
-                }
         }
     }
 }

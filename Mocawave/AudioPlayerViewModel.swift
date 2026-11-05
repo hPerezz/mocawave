@@ -61,7 +61,6 @@ final class AudioPlayerViewModel: ObservableObject {
     private var pendingDebugLogEntries: [String] = []
     private var debugLogFlushTask: Task<Void, Never>?
     private let preferences: UserDefaults
-    private let proFeaturesProvider: () -> Bool
     private let waveformAnalysisCoordinator: any WaveformAnalysisScheduling
     /// Incremented on every play() call; completion handlers compare against this
     /// to detect stale callbacks from previous scheduleSegment calls.
@@ -69,31 +68,21 @@ final class AudioPlayerViewModel: ObservableObject {
 
     init(
         userDefaults: UserDefaults = .standard,
-        proFeaturesProvider: (() -> Bool)? = nil,
         waveformAnalysisCoordinator: (any WaveformAnalysisScheduling)? = nil
     ) {
         self.preferences = userDefaults
-        self.proFeaturesProvider = proFeaturesProvider ?? { ProEntitlementStore.shared.effectiveProAccess }
         self.waveformAnalysisCoordinator = waveformAnalysisCoordinator ?? WaveformAnalysisCoordinator.shared
 
         let savedPreference = userDefaults.bool(forKey: Self.coloredWaveformPreferenceKey)
-        _showColoredWaveform = Published(initialValue: savedPreference && self.proFeaturesProvider())
-    }
-
-    private var proAnalysisEnabled: Bool {
-        proFeaturesProvider()
+        _showColoredWaveform = Published(initialValue: savedPreference)
     }
 
     var prefersColoredWaveform: Bool {
-        proAnalysisEnabled && showColoredWaveform
+        showColoredWaveform
     }
 
     var shouldRenderColoredWaveform: Bool {
         prefersColoredWaveform && !showSpectrogram
-    }
-
-    var isColoredWaveformLocked: Bool {
-        !proAnalysisEnabled
     }
 
     var analyzedKey: String? {
@@ -549,26 +538,11 @@ final class AudioPlayerViewModel: ObservableObject {
         preferences.bool(forKey: Self.coloredWaveformPreferenceKey)
     }
 
-    private func disableColoredWaveformPreference(persistPreference: Bool = true) {
-        showColoredWaveform = false
-        if persistPreference {
-            persistColoredWaveformPreference(false)
-        }
-        isAnalyzingColoredWaveform = false
-        coloredWaveformTask?.cancel()
-        cancelColoredWaveformAnalysis(for: currentURL)
-    }
-
     func toggleColoredWaveform() {
         setColoredWaveformEnabled(!showColoredWaveform)
     }
 
     func setColoredWaveformEnabled(_ enabled: Bool) {
-        guard proAnalysisEnabled else {
-            disableColoredWaveformPreference()
-            return
-        }
-
         if showColoredWaveform == enabled {
             persistColoredWaveformPreference(enabled)
             if enabled, let url = currentURL {
@@ -599,36 +573,6 @@ final class AudioPlayerViewModel: ObservableObject {
             spectrogramTask?.cancel()
             isAnalyzingSpectrogram = false
             cancelSpectrogramAnalysis(for: currentURL)
-        }
-    }
-
-    func handleProAccessChanged() {
-        objectWillChange.send()
-
-        if proAnalysisEnabled {
-            if savedColoredWaveformPreference() && !showColoredWaveform {
-                showColoredWaveform = true
-            }
-
-            configureRealtimeMetersIfNeeded()
-
-            if let url = currentURL {
-                if prefersColoredWaveform {
-                    prepareColoredWaveformIfNeeded(for: url)
-                }
-                if audioQuality == nil && !isAnalyzingQuality {
-                    prepareQualityIfNeeded(for: url)
-                }
-            }
-        } else {
-            if showColoredWaveform {
-                disableColoredWaveformPreference(persistPreference: false)
-            }
-            qualityAnalysisTask?.cancel()
-            cancelQualityAnalysis(for: currentURL)
-            audioQuality = nil
-            isAnalyzingQuality = false
-            disableRealtimeMeters()
         }
     }
 
@@ -668,10 +612,6 @@ final class AudioPlayerViewModel: ObservableObject {
     }
 
     private func configureRealtimeMetersIfNeeded() {
-        guard proAnalysisEnabled else {
-            disableRealtimeMeters()
-            return
-        }
         guard lufsMeter == nil else { return }
         guard let engine = audioEngine, let audioFile else { return }
 
@@ -713,26 +653,6 @@ final class AudioPlayerViewModel: ObservableObject {
 
             guard self.currentURL == capturedURL, self.prefersColoredWaveform else { return }
             self.analyzeColoredWaveform(for: url, shouldCache: true)
-        }
-    }
-
-    private func prepareQualityIfNeeded(for url: URL) {
-        guard proAnalysisEnabled, audioQuality == nil, !isAnalyzingQuality else { return }
-
-        let capturedURL = url
-        Task { [weak self] in
-            guard let self else { return }
-            if let cached = await AudioCache.shared.getCached(for: url),
-               let cachedQuality = cached.analyzedQuality,
-               self.currentURL == capturedURL,
-               self.proAnalysisEnabled {
-                self.audioQuality = cachedQuality
-                self.addDebugLog("Loaded cached quality: \(cachedQuality.estimatedBitrate.rawValue)")
-                return
-            }
-
-            guard self.currentURL == capturedURL, self.proAnalysisEnabled else { return }
-            self.analyzeQuality(for: url, shouldCache: true)
         }
     }
 
@@ -867,13 +787,11 @@ final class AudioPlayerViewModel: ObservableObject {
                 } else {
                     self.analyzeKey(for: url, shouldCache: true)
                 }
-                if self.proAnalysisEnabled {
-                    if let cachedQuality = cached.analyzedQuality {
-                        self.audioQuality = cachedQuality
-                        self.addDebugLog("Loaded cached quality: \(cachedQuality.estimatedBitrate.rawValue)")
-                    } else {
-                        self.analyzeQuality(for: url, shouldCache: true)
-                    }
+                if let cachedQuality = cached.analyzedQuality {
+                    self.audioQuality = cachedQuality
+                    self.addDebugLog("Loaded cached quality: \(cachedQuality.estimatedBitrate.rawValue)")
+                } else {
+                    self.analyzeQuality(for: url, shouldCache: true)
                 }
                 if self.prefersColoredWaveform {
                     if cached.coloredWaveformData != nil {
@@ -982,12 +900,6 @@ final class AudioPlayerViewModel: ObservableObject {
     }
 
     private func analyzeQuality(for url: URL, shouldCache: Bool = false) {
-        guard proAnalysisEnabled else {
-            audioQuality = nil
-            isAnalyzingQuality = false
-            return
-        }
-
         let capturedURL = url
         isAnalyzingQuality = true
         addDebugLog("Quality analysis started for: \(url.lastPathComponent)")
@@ -999,7 +911,7 @@ final class AudioPlayerViewModel: ObservableObject {
             guard let self else { return }
             do {
                 let (result, debug) = try await self.waveformAnalysisCoordinator.quality(url: url)
-                guard !Task.isCancelled, self.currentURL == capturedURL, self.proAnalysisEnabled else { return }
+                guard !Task.isCancelled, self.currentURL == capturedURL else { return }
                 self.audioQuality = result
                 self.addDebugLog("Quality: \(result.estimatedBitrate.rawValue) | frames=\(debug.totalFrames)")
                 self.addDebugLog("  rel16k=\(String(format: "%.1f", debug.medianRel16k)) rel17k=\(String(format: "%.1f", debug.medianRel17k)) rel18k=\(String(format: "%.1f", debug.medianRel18k))")
@@ -1013,7 +925,7 @@ final class AudioPlayerViewModel: ObservableObject {
                 return
             } catch {
                 self.addDebugLog("Quality analysis error: \(self.diagnosticDescription(for: error))")
-                guard !Task.isCancelled, self.currentURL == capturedURL, self.proAnalysisEnabled else { return }
+                guard !Task.isCancelled, self.currentURL == capturedURL else { return }
                 self.audioQuality = nil
             }
         }
@@ -1066,9 +978,7 @@ final class AudioPlayerViewModel: ObservableObject {
             if triggerFollowUpAnalysis {
                 self.analyzeBPM(for: url, shouldCache: true)
                 self.analyzeKey(for: url, shouldCache: true)
-                if self.proAnalysisEnabled {
-                    self.analyzeQuality(for: url, shouldCache: true)
-                }
+                self.analyzeQuality(for: url, shouldCache: true)
             }
         }
     }
