@@ -16,10 +16,6 @@
 		<data>
 		LA+ai6ffub+09cL4Yc8Q6Nyr7to=
 		</data>
-		<key>Resources/Mocawave Pro.storekit</key>
-		<data>
-		uddID0gmitJY0tpNYeBzujta+1M=
-		</data>
 		<key>Resources/librosa_bpm_analyzer.py</key>
 		<data>
 		rRhfOnqOiKL1YPH79BDxnfQH6IM=
@@ -46,13 +42,6 @@
 			<key>hash2</key>
 			<data>
 			/78I6oE9yfeyVkMFof8OEzmjzzoWvJuyIr2JBQF8054=
-			</data>
-		</dict>
-		<key>Resources/Mocawave Pro.storekit</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			cRHwhGm6DHMMY/ro0BIcDNOFT1g3lW0qPwEK7GVJ3EA=
 			</data>
 		</dict>
 		<key>Resources/librosa_bpm_analyzer.py</key>

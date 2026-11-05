@@ -86,7 +86,7 @@ The high-level flow is:
 | `Assets.xcassets` | App icon and accent color assets. |
 | `MocawaveTests/MocawaveTests.swift` | Unit tests for `WaveformAnalysisCoordinator`, including request deduplication, per-URL serialization, and cancellation of queued work. |
 | `MocawaveUITests` | Default UI test target scaffold. |
-| `Mocawave 2026-03-19 23-58-45/` | Exported `.app` bundle committed as an artifact snapshot. It is not part of the source build graph. |
+| `Mocawave 1.2/` | Exported `.app` bundle of version 1.2 (10), committed as an artifact snapshot. It is not part of the source build graph. |
 
 ## Data and Control Flow
 
