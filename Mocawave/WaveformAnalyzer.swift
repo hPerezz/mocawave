@@ -835,7 +835,7 @@ enum WaveformAnalyzer {
                     }
                     if fftCountInColumn > 0 {
                         var divisor = Float(fftCountInColumn)
-                        vDSP_vsdiv(currentMelSum, 1, &divisor, &columns[currentColumn], 1, vDSP_Length(freqBins))
+                        columns[currentColumn].withUnsafeMutableBufferPointer { dst in vDSP_vsdiv(currentMelSum, 1, &divisor, dst.baseAddress!, 1, vDSP_Length(freqBins)) }
                     }
                     currentMelSum = [Float](repeating: 0, count: freqBins)
                     fftCountInColumn = 0
@@ -860,7 +860,7 @@ enum WaveformAnalyzer {
             }
             if fftCountInColumn > 0 {
                 var divisor = Float(fftCountInColumn)
-                vDSP_vsdiv(currentMelSum, 1, &divisor, &columns[currentColumn], 1, vDSP_Length(freqBins))
+                columns[currentColumn].withUnsafeMutableBufferPointer { dst in vDSP_vsdiv(currentMelSum, 1, &divisor, dst.baseAddress!, 1, vDSP_Length(freqBins)) }
             }
         }
 
@@ -891,7 +891,7 @@ enum WaveformAnalyzer {
 
         // Normalize and apply power curve
         for col in 0..<columns.count {
-            vDSP_vsdiv(columns[col], 1, &globalMax, &columns[col], 1, vDSP_Length(freqBins))
+            columns[col].withUnsafeMutableBufferPointer { p in vDSP_vsdiv(p.baseAddress!, 1, &globalMax, p.baseAddress!, 1, vDSP_Length(freqBins)) }
             for bin in 0..<freqBins {
                 columns[col][bin] = powf(columns[col][bin], 0.6)
             }

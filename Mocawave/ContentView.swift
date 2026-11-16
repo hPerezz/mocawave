@@ -844,7 +844,7 @@ struct ContentView: View {
     private static let coffeeSlotWidth: CGFloat = coffeeWidth - 14
     private static let windowContentHeight: CGFloat = 172
     private static let minimumWindowWidth: CGFloat = 806
-    private static let supportedAudioContentTypes = ["mp3", "wav", "aac", "m4a"].compactMap { UTType(filenameExtension: $0) }
+    private static let supportedAudioContentTypes = ["mp3", "wav", "aac", "m4a", "flac", "aif", "aiff"].compactMap { UTType(filenameExtension: $0) }
 
     @MainActor
     init(viewModel: AudioPlayerViewModel? = nil) {

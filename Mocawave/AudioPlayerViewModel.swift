@@ -36,7 +36,7 @@ final class AudioPlayerViewModel: ObservableObject {
     @Published var debugLog: [String] = []
     @Published private var playbackTelemetry = PlaybackTelemetry()
 
-    private let supportedExtensions: Set<String> = ["mp3", "wav", "aac", "m4a"]
+    private let supportedExtensions: Set<String> = ["mp3", "wav", "aac", "m4a", "flac", "aif", "aiff"]
     private let faceAttackAlpha: Double = 0.30
     private let faceReleaseAlpha: Double = 0.12
     private let playbackLoopIntervalNanoseconds: UInt64 = 50_000_000
