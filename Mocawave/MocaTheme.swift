@@ -1,0 +1,63 @@
+import AppKit
+import SwiftUI
+
+/// Single source for colours and motion so every feature (drawers, Camelot, cues, stems) shares one rhythm.
+enum MocaTheme {
+    // MARK: Compatibility tiers (Camelot)
+    static func color(for tier: CamelotTier) -> Color {
+        switch tier {
+        case .perfect: return Color(red: 0.13, green: 0.77, blue: 0.37)   // #22C55E
+        case .good: return Color(red: 0.08, green: 0.72, blue: 0.65)      // #14B8A6
+        case .energy: return Color(red: 0.96, green: 0.62, blue: 0.04)    // #F59E0B
+        case .avoid: return Color.white.opacity(0.06)
+        }
+    }
+
+    // MARK: Stems (M4) and cues (M2) — defined now so every view reuses the same palette
+    enum Stem {
+        static let drums = Color(red: 0.98, green: 0.45, blue: 0.09)
+        static let bass = Color(red: 0.55, green: 0.36, blue: 0.96)
+        static let vocals = Color(red: 0.93, green: 0.28, blue: 0.60)
+        static let guitar = Color(red: 0.23, green: 0.51, blue: 0.96)
+        static let piano = Color(red: 0.92, green: 0.70, blue: 0.03)
+        static let other = Color(red: 0.58, green: 0.64, blue: 0.72)
+    }
+
+    enum Cue {
+        static let introOutro = Color(red: 0.23, green: 0.51, blue: 0.96)
+        static let build = Color(red: 0.92, green: 0.70, blue: 0.03)
+        static let drop = Color(red: 0.94, green: 0.27, blue: 0.27)
+        static let breakdown = Color(red: 0.13, green: 0.77, blue: 0.37)
+    }
+
+    // MARK: Surfaces
+    static let panelBackground = Color(NSColor.controlBackgroundColor)
+    static let panelStroke = Color.secondary.opacity(0.3)
+    static let panelRadius: CGFloat = 12
+}
+
+/// Motion tokens. Springs to arrive, faster ease-in to leave, short stagger; everything collapses to a
+/// short fade when the user enables Reduce Motion.
+enum MocaMotion {
+    static var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+
+    static var drawerIn: Animation {
+        reduceMotion ? .easeOut(duration: 0.1) : .spring(response: 0.38, dampingFraction: 0.86)
+    }
+    static var drawerOut: Animation {
+        reduceMotion ? .easeOut(duration: 0.1) : .easeIn(duration: 0.24)
+    }
+    /// Window frame animation matching drawerIn / drawerOut.
+    static var windowInDuration: TimeInterval { reduceMotion ? 0 : 0.32 }
+    static var windowOutDuration: TimeInterval { reduceMotion ? 0 : 0.22 }
+
+    static var state: Animation { .easeOut(duration: 0.15) }
+    static var pop: Animation {
+        reduceMotion ? .easeOut(duration: 0.1) : .spring(response: 0.32, dampingFraction: 0.8)
+    }
+
+    /// Delay between items revealed in sequence (lanes, wheel slices).
+    static let staggerStep: TimeInterval = 0.04
+    /// Delay between cue flags appearing one by one (M2).
+    static let cueStaggerStep: TimeInterval = 0.09
+}

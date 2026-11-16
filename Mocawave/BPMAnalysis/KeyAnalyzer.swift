@@ -30,6 +30,9 @@ enum KeyAnalyzer {
         let confidence: Float
         let runnerUpKey: String?
         let uncertaintyReason: UncertaintyReason?
+        /// Best-scoring key even when `status == .uncertain` (then `key` is nil). Lets the UI show
+        /// "8A or 8B" instead of nothing. Optional so caches written before this field still decode.
+        let candidateKey: String?
 
         init(
             status: KeyStatus,
@@ -37,7 +40,8 @@ enum KeyAnalyzer {
             camelot: String?,
             confidence: Float,
             runnerUpKey: String?,
-            uncertaintyReason: UncertaintyReason?
+            uncertaintyReason: UncertaintyReason?,
+            candidateKey: String? = nil
         ) {
             self.status = status
             self.key = key
@@ -45,6 +49,7 @@ enum KeyAnalyzer {
             self.confidence = confidence
             self.runnerUpKey = runnerUpKey
             self.uncertaintyReason = uncertaintyReason
+            self.candidateKey = candidateKey ?? key
         }
 
         var isResolved: Bool {
@@ -710,7 +715,8 @@ enum KeyAnalyzer {
                 camelot: nil,
                 confidence: confidence,
                 runnerUpKey: runnerUpIndex.map { candidates[$0].keyName },
-                uncertaintyReason: uncertaintyReason
+                uncertaintyReason: uncertaintyReason,
+                candidateKey: candidates[bestIndex].keyName
             )
         }
 

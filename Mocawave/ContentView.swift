@@ -133,7 +133,7 @@ struct DebugWindow: View {
 
 class FixedHeightWindowDelegate: NSObject, NSWindowDelegate {
     static var associatedKey = 0
-    private let fixedHeight: CGFloat
+    var fixedHeight: CGFloat
     private let viewModel: AudioPlayerViewModel
 
     init(fixedHeight: CGFloat, viewModel: AudioPlayerViewModel) {
@@ -834,6 +834,8 @@ struct ContentView: View {
     @State private var keyMonitor: Any?
     @State private var windowRef: NSWindow?
     @State private var showDebugWindow = false
+    @State private var openDrawers: Set<InspectorDrawer> = []
+    @State private var camelotSelection: CamelotKey?
     private let seekStep: TimeInterval = 5
     private static let controlRowSpacing: CGFloat = 12
     private static let topBarHeight: CGFloat = 22
@@ -854,6 +856,7 @@ struct ContentView: View {
     var body: some View {
         let isSleepMode = viewModel.duration > 0 && !viewModel.isPlaying
 
+        VStack(spacing: 0) {
         VStack(alignment: .leading, spacing: 8) {
             topBar
 
@@ -1007,6 +1010,20 @@ struct ContentView: View {
                     .foregroundColor(.red)
             }
         }
+        .frame(height: Self.windowContentHeight)
+
+            ForEach(orderedOpenDrawers) { drawer in
+                DrawerPanel(drawer: drawer, onClose: { toggleDrawer(drawer) }) {
+                    drawerContent(drawer)
+                }
+                .padding(.top, InspectorDrawer.gap)
+                .transition(.asymmetric(
+                    insertion: .opacity.combined(with: .offset(y: -12)),
+                    removal: .opacity.combined(with: .offset(y: -6))
+                ))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .padding(.horizontal, 14)
         .background(
             Group {
@@ -1039,6 +1056,9 @@ struct ContentView: View {
         }
         .onChange(of: viewModel.fileName) { newName in
             windowRef?.title = newName
+        }
+        .onChange(of: viewModel.keyAnalysisResult) { result in
+            camelotSelection = TrackCamelot(result).primary
         }
         .fileImporter(
             isPresented: $isImportingAudio,
@@ -1078,8 +1098,12 @@ struct ContentView: View {
             TopBarValueCell(title: "BPM", value: bpmDisplayText(viewModel: viewModel))
                 .frame(width: 68)
             TopBarDividerView()
-            TopBarValueCell(title: "KEY (CAMELOT)", value: keyCamelotDisplayText(viewModel: viewModel))
-                .frame(width: 132)
+            TopBarKeyCell(
+                value: keyCamelotDisplayText(viewModel: viewModel),
+                isOpen: openDrawers.contains(.camelot),
+                action: { toggleDrawer(.camelot) }
+            )
+            .frame(width: 148)
             Spacer(minLength: 0)
             TopBarDividerView()
             TopBarInstagramCell()
@@ -1105,7 +1129,7 @@ struct ContentView: View {
         window.appearance = NSAppearance(named: .darkAqua)
         window.title = viewModel.fileName
 
-        let contentHeight = Self.windowContentHeight
+        let contentHeight = currentContentHeight
         let currentContentWidth = window.contentRect(forFrameRect: window.frame).width
         let targetContentWidth = max(currentContentWidth, Self.minimumWindowWidth)
         window.setContentSize(NSSize(width: targetContentWidth, height: contentHeight))
@@ -1130,6 +1154,76 @@ struct ContentView: View {
 
     private func requestAudioImport() {
         isImportingAudio = true
+    }
+
+    // MARK: Drawers
+
+    private var orderedOpenDrawers: [InspectorDrawer] {
+        InspectorDrawer.allCases.filter { openDrawers.contains($0) }
+    }
+
+    private var currentContentHeight: CGFloat {
+        Self.windowContentHeight + InspectorDrawer.extraHeight(for: orderedOpenDrawers)
+    }
+
+    @ViewBuilder
+    private func drawerContent(_ drawer: InspectorDrawer) -> some View {
+        switch drawer {
+        case .camelot:
+            CamelotWheelView(track: TrackCamelot(viewModel.keyAnalysisResult), selection: $camelotSelection)
+        }
+    }
+
+    /// Opens with a spring and grows the window downward; closes faster than it opened (exit < enter).
+    private func toggleDrawer(_ drawer: InspectorDrawer) {
+        let opening = !openDrawers.contains(drawer)
+        if opening, drawer == .camelot, camelotSelection == nil {
+            camelotSelection = TrackCamelot(viewModel.keyAnalysisResult).primary
+        }
+        withAnimation(opening ? MocaMotion.drawerIn : MocaMotion.drawerOut) {
+            if opening { openDrawers.insert(drawer) } else { openDrawers.remove(drawer) }
+        }
+        resizeWindowForDrawers(opening: opening)
+    }
+
+    /// Keeps the top edge fixed (macOS origin is bottom-left) so the strip never jumps.
+    private func resizeWindowForDrawers(opening: Bool) {
+        guard let window = windowRef else { return }
+        let contentHeight = currentContentHeight
+        let width = window.contentRect(forFrameRect: window.frame).width
+        let frameHeight = window.frameRect(forContentRect: NSRect(x: 0, y: 0, width: width, height: contentHeight)).height
+        var frame = window.frame
+        frame.origin.y = frame.maxY - frameHeight
+        frame.size.height = frameHeight
+
+        window.contentMinSize = NSSize(width: Self.minimumWindowWidth, height: contentHeight)
+        window.contentMaxSize = NSSize(width: .greatestFiniteMagnitude, height: contentHeight)
+        window.minSize = NSSize(width: Self.minimumWindowWidth, height: frameHeight)
+        window.maxSize = NSSize(width: .greatestFiniteMagnitude, height: frameHeight)
+        (window.delegate as? FixedHeightWindowDelegate)?.fixedHeight = contentHeight
+
+        let duration = opening ? MocaMotion.windowInDuration : MocaMotion.windowOutDuration
+        guard duration > 0 else {
+            window.setFrame(frame, display: true)
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = duration
+            context.timingFunction = CAMediaTimingFunction(name: opening ? .easeOut : .easeIn)
+            context.allowsImplicitAnimation = true
+            window.animator().setFrame(frame, display: true)
+        }
+    }
+
+    private func rotateCamelotSelection(by steps: Int) {
+        guard let current = camelotSelection ?? TrackCamelot(viewModel.keyAnalysisResult).primary else { return }
+        withAnimation(MocaMotion.state) { camelotSelection = current.shifted(by: steps) }
+    }
+
+    private func setCamelotRing(major: Bool) {
+        guard let current = camelotSelection ?? TrackCamelot(viewModel.keyAnalysisResult).primary,
+              current.isMajor != major else { return }
+        withAnimation(MocaMotion.state) { camelotSelection = current.otherRing }
     }
 
     private func handleImportedAudio(_ result: Result<[URL], Error>) {
@@ -1255,6 +1349,31 @@ struct ContentView: View {
         // Don't intercept events destined for panels (like file dialogs)
         if event.window is NSPanel {
             return false
+        }
+
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let camelotOpen = openDrawers.contains(.camelot)
+        if flags.isEmpty, event.keyCode == 40 { // 'k'
+            toggleDrawer(.camelot)
+            return true
+        }
+        if camelotOpen, flags.subtracting([.numericPad, .function]) == [.option] { // arrows carry numericPad/function
+            switch event.keyCode {
+            case 123: rotateCamelotSelection(by: -1); return true
+            case 124: rotateCamelotSelection(by: 1); return true
+            case 126: setCamelotRing(major: true); return true
+            case 125: setCamelotRing(major: false); return true
+            default: break
+            }
+        }
+        if camelotOpen, event.keyCode == 53 { // esc
+            let trackKey = TrackCamelot(viewModel.keyAnalysisResult).primary
+            if let trackKey, camelotSelection != trackKey {
+                withAnimation(MocaMotion.state) { camelotSelection = trackKey }
+            } else {
+                toggleDrawer(.camelot)
+            }
+            return true
         }
 
         guard viewModel.duration > 0 else { return false }
