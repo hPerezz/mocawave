@@ -36,7 +36,9 @@ enum CueDetector {
         let features = try extractFeatures(url: url)
         guard let grid = fitGrid(features, bpmHint: bpmHint) else { return CueAnalysis(grid: nil, cues: []) }
         let profile = barProfile(features, grid: grid)
-        let cues = detectCues(profile, grid: grid, duration: features.duration)
+        let cues = decoderVersion == 2
+            ? StructureDecoder.decode(profile, grid: grid, duration: features.duration)
+            : detectCues(profile, grid: grid, duration: features.duration)
         if let reason = structureGate(cues: cues, grid: grid, duration: features.duration) {
             return CueAnalysis(grid: grid, cues: [], skippedReason: reason)
         }
@@ -113,6 +115,10 @@ enum CueDetector {
             return out[(i + 1)...].first(where: { $0.kind != .build && $0.kind != .cue })?.kind == .drop
         }.map(\.element)
     }
+
+    /// 1 = rule chain (detectCues), 2 = novelty boundaries + Viterbi grammar (StructureDecoder).
+    /// MOCA_DECODER overrides it for benchmarks.
+    nonisolated static let decoderVersion: Int = ProcessInfo.processInfo.environment["MOCA_DECODER"].flatMap(Int.init) ?? 1
 
     // MARK: - 0. When to show cues at all
 
