@@ -490,65 +490,46 @@ enum WaveformAnalyzer {
     private static func normalizeColoredWaveform(_ data: inout ColoredWaveformData) {
         guard !data.columns.isEmpty else { return }
 
-        var maxHeight: Float = 0
-        var maxRed: Float = 0
-        var maxGreen: Float = 0
-        var maxBlue: Float = 0
+        // Levels in dB relative to each band's own maximum over the track (DJ-software convention): the
+        // colour then says how loud each band is *for this track*, and the drops stand out.
+        let raw = data.columns
+        let maxHeight = max(raw.map(\.height).max() ?? 0, 1e-12)
+        let maxRed = max(raw.map(\.red).max() ?? 0, 1e-12)
+        let maxGreen = max(raw.map(\.green).max() ?? 0, 1e-12)
+        let maxBlue = max(raw.map(\.blue).max() ?? 0, 1e-12)
+        func db(_ x: Float, _ top: Float) -> Float { 10 * log10f(max(x / top, 1e-9)) }
+        func clamp01(_ x: Float) -> Float { min(max(x, 0), 1) }
+        let maxLogHeight = log1p(maxHeight)
 
         for index in data.columns.indices {
-            data.columns[index].height = log1p(data.columns[index].height)
-            data.columns[index].red = log1p(data.columns[index].red)
-            data.columns[index].green = log1p(data.columns[index].green)
-            data.columns[index].blue = log1p(data.columns[index].blue)
+            let column = raw[index]
+            // Bar height: unchanged from the original renderer.
+            data.columns[index].height = powf(log1p(column.height) / maxLogHeight, 0.55)
 
-            maxHeight = max(maxHeight, data.columns[index].height)
-            maxRed = max(maxRed, data.columns[index].red)
-            maxGreen = max(maxGreen, data.columns[index].green)
-            maxBlue = max(maxBlue, data.columns[index].blue)
-        }
+            let low = db(column.red, maxRed), mid = db(column.green, maxGreen), high = db(column.blue, maxBlue)
+            let total = db(column.height, maxHeight)
 
-        for index in data.columns.indices {
-            let normalizedHeight = maxHeight > 0 ? data.columns[index].height / maxHeight : 0
-            data.columns[index].height = powf(normalizedHeight, 0.55)
-
-            let normalizedRed = maxRed > 0 ? data.columns[index].red / maxRed : 0
-            let normalizedGreen = maxGreen > 0 ? data.columns[index].green / maxGreen : 0
-            let normalizedBlue = maxBlue > 0 ? data.columns[index].blue / maxBlue : 0
-            let totalColor = max(normalizedRed + normalizedGreen + normalizedBlue, 1e-12)
-            let redShare = normalizedRed / totalColor
-            if redShare >= coloredWaveformPureRedThreshold {
-                data.columns[index].red = 1.0
-                data.columns[index].green = 0
-                data.columns[index].blue = 0
-                continue
-            }
-            let redDominance = min(
-                max(
-                    (redShare - coloredWaveformRedDominanceThreshold) /
-                        (1.0 - coloredWaveformRedDominanceThreshold),
-                    0
-                ),
-                1
-            )
-            var adjustedRed = normalizedRed * (1.0 + redDominance * coloredWaveformRedDominanceBoost)
-            var adjustedGreen = normalizedGreen * (1.0 - redDominance * coloredWaveformGreenSuppression)
-            var adjustedBlue = normalizedBlue * (1.0 - redDominance * coloredWaveformBlueSuppression)
-            let dominant = max(adjustedRed, adjustedGreen, adjustedBlue)
-
+            // Hue: each band 0…1 over its top 18 dB, squared so the dominant band shows.
+            var r = powf(clamp01((low + 18) / 18), 2)
+            var g = powf(clamp01((mid + 18) / 18), 2) * 0.8
+            var b = powf(clamp01((high + 18) / 18), 2) * 0.6
+            // Kick + bass at the track's own peak (drops) turn red: from −6 dB (none) to −1.5 dB (full).
+            let kick = clamp01((low + 6) / 4.5)
+            r += (1 - r) * kick * 0.7
+            g *= 1 - kick * 0.6
+            b *= 1 - kick * 0.7
+            let dominant = max(r, g, b)
             guard dominant > 0 else {
                 data.columns[index].red = 0
                 data.columns[index].green = 0
                 data.columns[index].blue = 0
                 continue
             }
-
-            adjustedRed = max(adjustedRed, 0)
-            adjustedGreen = max(adjustedGreen, 0)
-            adjustedBlue = max(adjustedBlue, 0)
-
-            data.columns[index].red = min(1.0, powf(adjustedRed / dominant, 0.48))
-            data.columns[index].green = powf(adjustedGreen / dominant, 0.68)
-            data.columns[index].blue = powf(adjustedBlue / dominant, 0.72)
+            // Brightness from the overall level: −2 dB → full, −15 dB → 30 %. Quiet sections read dimmer.
+            let brightness = 0.3 + 0.7 * clamp01((total + 15) / 13)
+            data.columns[index].red = r / dominant * brightness
+            data.columns[index].green = g / dominant * brightness
+            data.columns[index].blue = b / dominant * brightness
         }
     }
 
@@ -835,7 +816,7 @@ enum WaveformAnalyzer {
                     }
                     if fftCountInColumn > 0 {
                         var divisor = Float(fftCountInColumn)
-                        vDSP_vsdiv(currentMelSum, 1, &divisor, &columns[currentColumn], 1, vDSP_Length(freqBins))
+                        columns[currentColumn].withUnsafeMutableBufferPointer { dst in vDSP_vsdiv(currentMelSum, 1, &divisor, dst.baseAddress!, 1, vDSP_Length(freqBins)) }
                     }
                     currentMelSum = [Float](repeating: 0, count: freqBins)
                     fftCountInColumn = 0
@@ -860,7 +841,7 @@ enum WaveformAnalyzer {
             }
             if fftCountInColumn > 0 {
                 var divisor = Float(fftCountInColumn)
-                vDSP_vsdiv(currentMelSum, 1, &divisor, &columns[currentColumn], 1, vDSP_Length(freqBins))
+                columns[currentColumn].withUnsafeMutableBufferPointer { dst in vDSP_vsdiv(currentMelSum, 1, &divisor, dst.baseAddress!, 1, vDSP_Length(freqBins)) }
             }
         }
 
@@ -891,7 +872,7 @@ enum WaveformAnalyzer {
 
         // Normalize and apply power curve
         for col in 0..<columns.count {
-            vDSP_vsdiv(columns[col], 1, &globalMax, &columns[col], 1, vDSP_Length(freqBins))
+            columns[col].withUnsafeMutableBufferPointer { p in vDSP_vsdiv(p.baseAddress!, 1, &globalMax, p.baseAddress!, 1, vDSP_Length(freqBins)) }
             for bin in 0..<freqBins {
                 columns[col][bin] = powf(columns[col][bin], 0.6)
             }

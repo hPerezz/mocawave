@@ -474,8 +474,9 @@ enum BPMAnalyzer4 {
     nonisolated private static func foldBPM(_ raw: Int) -> Int {
         guard raw > 0 else { return 0 }
         var b = raw
-        while b < 40  { b *= 2 }
-        while b > 240 { b /= 2 }
+        // DJ range (same as the dj-stack): 240 for a 120 BPM track is a doubled beat, not a tempo.
+        while b < 70  { b *= 2 }
+        while b > 180 { b /= 2 }
         return b
     }
 

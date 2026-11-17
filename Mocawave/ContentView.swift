@@ -133,7 +133,7 @@ struct DebugWindow: View {
 
 class FixedHeightWindowDelegate: NSObject, NSWindowDelegate {
     static var associatedKey = 0
-    private let fixedHeight: CGFloat
+    var fixedHeight: CGFloat
     private let viewModel: AudioPlayerViewModel
 
     init(fixedHeight: CGFloat, viewModel: AudioPlayerViewModel) {
@@ -167,6 +167,8 @@ struct VolumeFaceView: View {
     let isDisabled: Bool
     let isSleeping: Bool
     let isAngry: Bool
+    /// Drop moment: the whole mascot turns the drop red.
+    var isDropping: Bool = false
 
     static func normalizedActivity(for expression: Double) -> Double {
         let clampedExpression = min(max(expression, -1), 1)
@@ -200,11 +202,13 @@ struct VolumeFaceView: View {
     }
 
     private var strokeColor: Color {
-        Color.white.opacity(isDisabled ? 0.26 : 0.72)
+        if isDropping { return MocaTheme.Cue.drop }
+        return Color.white.opacity(isDisabled ? 0.26 : 0.72)
     }
 
     private var accentColor: Color {
-        Color.white.opacity(isDisabled ? 0.20 : 0.88)
+        if isDropping { return MocaTheme.Cue.drop }
+        return Color.white.opacity(isDisabled ? 0.20 : 0.88)
     }
 
     var body: some View {
@@ -268,7 +272,7 @@ struct VolumeFaceView: View {
                     )
                     path.addLine(to: CGPoint(x: mugRect.minX + mugWallInset, y: rimY))
                 }
-                .fill(Color.white.opacity(isDisabled ? 0.05 : 0.08))
+                .fill(isDropping ? MocaTheme.Cue.drop.opacity(0.35) : Color.white.opacity(isDisabled ? 0.05 : 0.08))
 
                 Path { path in
                     path.move(to: leftShoulder)
@@ -431,6 +435,7 @@ struct VolumeFaceView: View {
 enum CoffeeSteamStyle {
     case steam
     case sleep
+    case co2   // drop moment: dense white jet
 }
 
 struct CoffeeSteamView: View {
@@ -441,6 +446,7 @@ struct CoffeeSteamView: View {
 
     private let columnOffsets: [CGFloat] = [-0.16, 0.0, 0.16]
     private let sleepOffsets: [CGFloat] = [-0.10, 0.02, 0.16]
+    private let co2Offsets: [CGFloat] = [-0.2, -0.1, 0, 0.1, 0.2]
 
     var body: some View {
         GeometryReader { geometry in
@@ -485,6 +491,25 @@ struct CoffeeSteamView: View {
                                     Color.white.opacity(coreOpacity),
                                     style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round)
                                 )
+                        }
+                    case .co2:
+                        // Five fast, nearly straight columns with dashes racing upward: a CO2 burst.
+                        let lineWidth = max(3, cupHeight * 0.05)
+                        ForEach(co2Offsets.indices, id: \.self) { index in
+                            let x = size.width * (0.5 + co2Offsets[index])
+                            let sway = CGFloat(sin(time * 9 + Double(index) * 1.7)) * size.width * 0.012
+                            let top = startY - rise * (1.5 + 0.12 * CGFloat(sin(time * 7 + Double(index))))
+                            let jet = Path { path in
+                                path.move(to: CGPoint(x: x, y: startY))
+                                path.addLine(to: CGPoint(x: x + sway, y: top))
+                            }
+                            jet.stroke(Color.white.opacity(0.35),
+                                       style: StrokeStyle(lineWidth: lineWidth * 2.6, lineCap: .round))
+                                .blur(radius: lineWidth)
+                            jet.stroke(Color.white.opacity(0.9),
+                                       style: StrokeStyle(lineWidth: lineWidth, lineCap: .round,
+                                                          dash: [lineWidth * 2.2, lineWidth * 1.4],
+                                                          dashPhase: CGFloat(time * 140)))
                         }
                     case .sleep:
                         ForEach(sleepOffsets.indices, id: \.self) { index in
@@ -834,6 +859,8 @@ struct ContentView: View {
     @State private var keyMonitor: Any?
     @State private var windowRef: NSWindow?
     @State private var showDebugWindow = false
+    @State private var openDrawers: Set<InspectorDrawer> = []
+    @State private var camelotSelection: CamelotKey?
     private let seekStep: TimeInterval = 5
     private static let controlRowSpacing: CGFloat = 12
     private static let topBarHeight: CGFloat = 22
@@ -844,7 +871,7 @@ struct ContentView: View {
     private static let coffeeSlotWidth: CGFloat = coffeeWidth - 14
     private static let windowContentHeight: CGFloat = 172
     private static let minimumWindowWidth: CGFloat = 806
-    private static let supportedAudioContentTypes = ["mp3", "wav", "aac", "m4a"].compactMap { UTType(filenameExtension: $0) }
+    private static let supportedAudioContentTypes = ["mp3", "wav", "aac", "m4a", "flac", "aif", "aiff"].compactMap { UTType(filenameExtension: $0) }
 
     @MainActor
     init(viewModel: AudioPlayerViewModel? = nil) {
@@ -854,6 +881,7 @@ struct ContentView: View {
     var body: some View {
         let isSleepMode = viewModel.duration > 0 && !viewModel.isPlaying
 
+        VStack(spacing: 0) {
         VStack(alignment: .leading, spacing: 8) {
             topBar
 
@@ -910,7 +938,8 @@ struct ContentView: View {
                                 progress: viewModel.progress,
                                 onSeek: { fraction in
                                     viewModel.seekToFraction(fraction)
-                                }
+                                },
+                                sections: waveformSections
                             )
                         }
                         if viewModel.waveformSamples.isEmpty {
@@ -940,7 +969,20 @@ struct ContentView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, minHeight: Self.mainControlHeight, maxHeight: Self.mainControlHeight)
-                .background(Color(NSColor.controlBackgroundColor))
+                .overlay {
+                    if viewModel.duration > 0, !viewModel.waveformSamples.isEmpty {
+                        CueFlagsOverlay(
+                            cues: viewModel.cues,
+                            duration: viewModel.duration,
+                            grid: viewModel.beatGrid,
+                            animateIn: viewModel.cuesJustDetected,
+                            selectedID: $viewModel.selectedCueID,
+                            onSeek: { viewModel.seek(to: $0) },
+                            onMove: { id, time, snap in viewModel.moveCue(id: id, to: time, snap: snap) }
+                        )
+                    }
+                }
+                .background(MocaTheme.panelBackground)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .overlay(
                     RoundedRectangle(cornerRadius: 12)
@@ -983,20 +1025,25 @@ struct ContentView: View {
                 ZStack(alignment: .bottom) {
                     if viewModel.duration > 0 {
                         CoffeeSteamView(
-                            expression: viewModel.faceExpression,
+                            expression: viewModel.isDropMoment ? 1 : viewModel.faceExpression,
                             isDisabled: false,
                             cupHeight: Self.coffeeHeight,
-                            style: viewModel.isPlaying ? .steam : .sleep
+                            // Reduce Motion: the colour change alone marks the drop.
+                            style: viewModel.isDropMoment && !MocaMotion.reduceMotion ? .co2 : (viewModel.isPlaying ? .steam : .sleep)
                         )
                         .frame(width: Self.coffeeWidth, height: Self.mainControlHeight)
                     }
 
                     VolumeFaceView(
-                        expression: viewModel.faceExpression,
+                        expression: viewModel.isDropMoment ? 1 : viewModel.faceExpression,
                         isDisabled: false,
                         isSleeping: isSleepMode,
-                        isAngry: viewModel.duration == 0
+                        isAngry: viewModel.duration == 0,
+                        isDropping: viewModel.isDropMoment
                     )
+                    // In fast (120 ms), out slower (400 ms).
+                    .animation(viewModel.isDropMoment ? .easeOut(duration: 0.12) : .easeOut(duration: 0.4),
+                               value: viewModel.isDropMoment)
                     .frame(width: Self.coffeeWidth, height: Self.coffeeHeight)
                 }
                 .frame(width: Self.coffeeSlotWidth, height: Self.mainControlHeight, alignment: .bottom)
@@ -1007,6 +1054,23 @@ struct ContentView: View {
                     .foregroundColor(.red)
             }
         }
+        .frame(height: Self.windowContentHeight)
+        // The strip never inherits the drawer's spring: without this the waveform bars re-laid out with
+        // the drawer animation every time the Camelot opened or closed.
+        .transaction { $0.animation = nil }
+
+            ForEach(orderedOpenDrawers) { drawer in
+                DrawerPanel(drawer: drawer, onClose: { toggleDrawer(drawer) }) {
+                    drawerContent(drawer)
+                }
+                .padding(.top, InspectorDrawer.gap)
+                .transition(.asymmetric(
+                    insertion: .opacity.combined(with: .offset(y: -12)),
+                    removal: .opacity.combined(with: .offset(y: -6))
+                ))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .padding(.horizontal, 14)
         .background(
             Group {
@@ -1039,6 +1103,9 @@ struct ContentView: View {
         }
         .onChange(of: viewModel.fileName) { newName in
             windowRef?.title = newName
+        }
+        .onChange(of: viewModel.keyAnalysisResult) { result in
+            camelotSelection = TrackCamelot(result).primary
         }
         .fileImporter(
             isPresented: $isImportingAudio,
@@ -1078,8 +1145,12 @@ struct ContentView: View {
             TopBarValueCell(title: "BPM", value: bpmDisplayText(viewModel: viewModel))
                 .frame(width: 68)
             TopBarDividerView()
-            TopBarValueCell(title: "KEY (CAMELOT)", value: keyCamelotDisplayText(viewModel: viewModel))
-                .frame(width: 132)
+            TopBarKeyCell(
+                value: keyCamelotDisplayText(viewModel: viewModel),
+                isOpen: openDrawers.contains(.camelot),
+                action: { toggleDrawer(.camelot) }
+            )
+            .frame(width: 148)
             Spacer(minLength: 0)
             TopBarDividerView()
             TopBarInstagramCell()
@@ -1087,7 +1158,7 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity)
         .frame(height: Self.topBarHeight)
-        .background(Color(NSColor.controlBackgroundColor).opacity(0.82))
+        .background(MocaTheme.barBackground)
         .overlay(
             Rectangle()
                 .stroke(Color.white.opacity(0.12), lineWidth: 1)
@@ -1101,11 +1172,12 @@ struct ContentView: View {
         window.styleMask.insert(.fullSizeContentView)
         window.isMovableByWindowBackground = true
         window.isOpaque = false
-        window.backgroundColor = NSColor.black.withAlphaComponent(0.9)
+        window.backgroundColor = .clear
+        GlassBackdrop.install(in: window)   // frosted, blurs what is behind the window
         window.appearance = NSAppearance(named: .darkAqua)
         window.title = viewModel.fileName
 
-        let contentHeight = Self.windowContentHeight
+        let contentHeight = currentContentHeight
         let currentContentWidth = window.contentRect(forFrameRect: window.frame).width
         let targetContentWidth = max(currentContentWidth, Self.minimumWindowWidth)
         window.setContentSize(NSSize(width: targetContentWidth, height: contentHeight))
@@ -1130,6 +1202,83 @@ struct ContentView: View {
 
     private func requestAudioImport() {
         isImportingAudio = true
+    }
+
+    /// Sections for the mono waveform: each cue (except plain "C" markers) colours the stretch it opens.
+    private var waveformSections: [WaveformSection] {
+        guard viewModel.duration > 0 else { return [] }
+        return viewModel.cues.filter { $0.kind != .cue }.sorted { $0.time < $1.time }
+            .map { WaveformSection(start: $0.time / viewModel.duration, color: $0.kind.color) }
+    }
+
+    // MARK: Drawers
+
+    private var orderedOpenDrawers: [InspectorDrawer] {
+        InspectorDrawer.allCases.filter { openDrawers.contains($0) }
+    }
+
+    private var currentContentHeight: CGFloat {
+        Self.windowContentHeight + InspectorDrawer.extraHeight(for: orderedOpenDrawers)
+    }
+
+    @ViewBuilder
+    private func drawerContent(_ drawer: InspectorDrawer) -> some View {
+        switch drawer {
+        case .camelot:
+            CamelotWheelView(track: TrackCamelot(viewModel.keyAnalysisResult), selection: $camelotSelection)
+        }
+    }
+
+    /// Opens with a spring and grows the window downward; closes faster than it opened (exit < enter).
+    private func toggleDrawer(_ drawer: InspectorDrawer) {
+        let opening = !openDrawers.contains(drawer)
+        if opening, drawer == .camelot, camelotSelection == nil {
+            camelotSelection = TrackCamelot(viewModel.keyAnalysisResult).primary
+        }
+        withAnimation(opening ? MocaMotion.drawerIn : MocaMotion.drawerOut) {
+            if opening { openDrawers.insert(drawer) } else { openDrawers.remove(drawer) }
+        }
+        resizeWindowForDrawers(opening: opening)
+    }
+
+    /// Keeps the top edge fixed (macOS origin is bottom-left) so the strip never jumps.
+    private func resizeWindowForDrawers(opening: Bool) {
+        guard let window = windowRef else { return }
+        let contentHeight = currentContentHeight
+        let width = window.contentRect(forFrameRect: window.frame).width
+        let frameHeight = window.frameRect(forContentRect: NSRect(x: 0, y: 0, width: width, height: contentHeight)).height
+        var frame = window.frame
+        frame.origin.y = frame.maxY - frameHeight
+        frame.size.height = frameHeight
+
+        window.contentMinSize = NSSize(width: Self.minimumWindowWidth, height: contentHeight)
+        window.contentMaxSize = NSSize(width: .greatestFiniteMagnitude, height: contentHeight)
+        window.minSize = NSSize(width: Self.minimumWindowWidth, height: frameHeight)
+        window.maxSize = NSSize(width: .greatestFiniteMagnitude, height: frameHeight)
+        (window.delegate as? FixedHeightWindowDelegate)?.fixedHeight = contentHeight
+
+        let duration = opening ? MocaMotion.windowInDuration : MocaMotion.windowOutDuration
+        guard duration > 0 else {
+            window.setFrame(frame, display: true)
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = duration
+            context.timingFunction = CAMediaTimingFunction(name: opening ? .easeOut : .easeIn)
+            context.allowsImplicitAnimation = true
+            window.animator().setFrame(frame, display: true)
+        }
+    }
+
+    private func rotateCamelotSelection(by steps: Int) {
+        guard let current = camelotSelection ?? TrackCamelot(viewModel.keyAnalysisResult).primary else { return }
+        withAnimation(MocaMotion.state) { camelotSelection = current.shifted(by: steps) }
+    }
+
+    private func setCamelotRing(major: Bool) {
+        guard let current = camelotSelection ?? TrackCamelot(viewModel.keyAnalysisResult).primary,
+              current.isMajor != major else { return }
+        withAnimation(MocaMotion.state) { camelotSelection = current.otherRing }
     }
 
     private func handleImportedAudio(_ result: Result<[URL], Error>) {
@@ -1173,11 +1322,8 @@ struct ContentView: View {
     }
 
     private func bpmDisplayText(viewModel: AudioPlayerViewModel) -> String {
-        if let bpm = viewModel.bpm {
+        if let bpm = viewModel.displayBPM {
             return "\(bpm)"
-        }
-        if let analyzedBPM = viewModel.analyzedBPM {
-            return "\(analyzedBPM)"
         }
         return viewModel.isAnalyzingBPM ? "..." : "--"
     }
@@ -1257,7 +1403,54 @@ struct ContentView: View {
             return false
         }
 
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let camelotOpen = openDrawers.contains(.camelot)
+        if flags.isEmpty, event.keyCode == 40 { // 'k'
+            toggleDrawer(.camelot)
+            return true
+        }
+        if camelotOpen, flags.subtracting([.numericPad, .function]) == [.option] { // arrows carry numericPad/function
+            switch event.keyCode {
+            case 123: rotateCamelotSelection(by: -1); return true
+            case 124: rotateCamelotSelection(by: 1); return true
+            case 126: setCamelotRing(major: true); return true
+            case 125: setCamelotRing(major: false); return true
+            default: break
+            }
+        }
+        if !camelotOpen, event.keyCode == 53, viewModel.selectedCueID != nil { // esc deselects a cue
+            viewModel.selectedCueID = nil
+            return true
+        }
+        if camelotOpen, event.keyCode == 53 { // esc
+            let trackKey = TrackCamelot(viewModel.keyAnalysisResult).primary
+            if let trackKey, camelotSelection != trackKey {
+                withAnimation(MocaMotion.state) { camelotSelection = trackKey }
+            } else {
+                toggleDrawer(.camelot)
+            }
+            return true
+        }
+
         guard viewModel.duration > 0 else { return false }
+
+        // Cues: ⇧←/⇧→ jump, ⌫ deletes, ⇧ + I B D R O C add at the playhead (snapped to the bar; ⇧⌥ = free).
+        // Shift is required so stray typing while the window has focus never drops cues.
+        let plainFlags = flags.subtracting([.numericPad, .function])
+        if plainFlags == [.shift], event.keyCode == 123 || event.keyCode == 124 {
+            viewModel.jumpToCue(forward: event.keyCode == 124)
+            return true
+        }
+        if plainFlags.isEmpty, event.keyCode == 51 || event.keyCode == 117 { // delete / forward delete
+            viewModel.deleteCue()
+            return true
+        }
+        if plainFlags == [.shift] || plainFlags == [.shift, .option],
+           let letter = event.charactersIgnoringModifiers, let kind = CueKind.forShortcut(letter) {
+            viewModel.addCue(kind: kind, snap: plainFlags == [.shift])
+            return true
+        }
+
         switch event.keyCode {
         case 49: // space
             viewModel.togglePlay()

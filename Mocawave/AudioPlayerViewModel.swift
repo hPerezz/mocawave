@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import Combine
 import CoreGraphics
@@ -17,14 +18,25 @@ final class AudioPlayerViewModel: ObservableObject {
 
     @Published var isPlaying: Bool = false
     @Published var duration: TimeInterval = 0
-    @Published var waveformSamples: [Float] = []
+    @Published var waveformSamples: [Float] = [] { didSet { scheduleCueDetectionIfReady() } }
     @Published var coloredWaveformData: WaveformAnalyzer.ColoredWaveformData? = nil
     @Published var fileName: String = "No file loaded"
     @Published var errorMessage: String?
-    @Published var bpm: Int?
-    @Published var analyzedBPM: Int?
+    @Published var bpm: Int? { didSet { scheduleCueDetectionIfReady() } }
+    @Published var analyzedBPM: Int? { didSet { scheduleCueDetectionIfReady() } }
     @Published var isAnalyzingBPM: Bool = false
     @Published var keyAnalysisResult: KeyAnalyzer.KeyAnalysisResult?
+    /// Grid + cues for the open file (nil until detected or loaded from CueStore).
+    @Published private(set) var cueAnalysis: CueAnalysis?
+    /// True when the cues were just detected (flags animate in); false when they came from the store.
+    @Published private(set) var cuesJustDetected = false
+    @Published var selectedCueID: UUID?
+    /// True for `dropMomentDuration` after the playhead crosses a confident drop: the mascot's "CO2" moment.
+    @Published private(set) var isDropMoment = false
+    static let dropMomentDuration: TimeInterval = 2.5   // about one CO2 burst
+    /// Fires on every drop crossing. Hook for driving a real CO2 rig later (OSC/MIDI); nothing listens yet.
+    let dropEvents = PassthroughSubject<Cue, Never>()
+    private var dropMomentTask: Task<Void, Never>?
     @Published var isAnalyzingKey: Bool = false
     @Published var spectrogramImage: CGImage? = nil
     @Published var isAnalyzingSpectrogram: Bool = false
@@ -36,7 +48,7 @@ final class AudioPlayerViewModel: ObservableObject {
     @Published var debugLog: [String] = []
     @Published private var playbackTelemetry = PlaybackTelemetry()
 
-    private let supportedExtensions: Set<String> = ["mp3", "wav", "aac", "m4a"]
+    private let supportedExtensions: Set<String> = ["mp3", "wav", "aac", "m4a", "flac", "aif", "aiff"]
     private let faceAttackAlpha: Double = 0.30
     private let faceReleaseAlpha: Double = 0.12
     private let playbackLoopIntervalNanoseconds: UInt64 = 50_000_000
@@ -46,12 +58,17 @@ final class AudioPlayerViewModel: ObservableObject {
     private var audioFile: AVAudioFile?
     private var startingFramePosition: AVAudioFramePosition = 0
     private var lufsMeter: LUFSMeter?
+    private var lowEndListener: LowEndListener?
+    /// Drops already celebrated in this pass (cleared for drops after a backward seek).
+    private var firedDrops: Set<UUID> = []
     private var analysisTask: Task<Void, Never>?
     private var bpmAnalysisTask: Task<Void, Never>?
     private var keyAnalysisTask: Task<Void, Never>?
     private var spectrogramTask: Task<Void, Never>?
     private var coloredWaveformTask: Task<Void, Never>?
     private var qualityAnalysisTask: Task<Void, Never>?
+    private var cueTask: Task<Void, Never>?
+    private var cueRequestedURL: URL?
     private var playbackTask: Task<Void, Never>?
     private var isScrubbing: Bool = false
     private var currentURL: URL?
@@ -182,6 +199,7 @@ final class AudioPlayerViewModel: ObservableObject {
         if previousURL != url {
             cancelWaveformFamily(for: previousURL)
         }
+        resetCues()
         waveformSamples = []
         coloredWaveformData = nil
         spectrogramImage = nil
@@ -234,8 +252,10 @@ final class AudioPlayerViewModel: ObservableObject {
             return false
         }
 
-        play()
+        // Analysis first: if the output device isn't running, AVAudioPlayerNode.play() raises an ObjC
+        // exception ("player did not see an IO cycle") that skips the rest of open().
         loadOrAnalyze(url: url)
+        play()
         if showSpectrogram {
             analyzeAndRenderSpectrogram(for: url)
         }
@@ -300,6 +320,8 @@ final class AudioPlayerViewModel: ObservableObject {
 
         startingFramePosition = targetFrame
         lufsMeter?.reset()
+        lowEndListener?.reset()
+        firedDrops = firedDrops.filter { id in cues.first { $0.id == id }.map { $0.time < clamped } ?? false }
         updatePlaybackTelemetry { telemetry in
             telemetry.currentTime = clamped
             telemetry.realtimeLUFS = nil
@@ -623,8 +645,11 @@ final class AudioPlayerViewModel: ObservableObject {
         lufsMeter = meter
 
         let tapFormat = engine.mainMixerNode.outputFormat(forBus: 0)
+        let listener = LowEndListener(sampleRate: tapFormat.sampleRate)
+        lowEndListener = listener
         engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: tapFormat) { buffer, _ in
             meter.process(buffer: buffer)
+            listener.process(buffer: buffer)
         }
     }
 
@@ -633,6 +658,7 @@ final class AudioPlayerViewModel: ObservableObject {
             engine.mainMixerNode.removeTap(onBus: 0)
         }
         lufsMeter = nil
+        lowEndListener = nil
         clearRealtimePlaybackMetrics()
     }
 
@@ -993,6 +1019,7 @@ final class AudioPlayerViewModel: ObservableObject {
                     let framePos = self.currentFramePosition()
                     let sampleRate = self.audioFile?.processingFormat.sampleRate ?? 44100
                     nextTelemetry.currentTime = Double(framePos) / sampleRate
+                    self.listenForDrop(at: nextTelemetry.currentTime)
                 }
                 if let meter = self.lufsMeter {
                     nextTelemetry.realtimeLUFS = meter.shortTermLUFS
@@ -1019,6 +1046,167 @@ final class AudioPlayerViewModel: ObservableObject {
         playbackTask = nil
     }
 
+    // MARK: - Cues
+
+    var cues: [Cue] { cueAnalysis?.cues ?? [] }
+
+    /// BPM to show: the file's tag, else the cue grid (fitted over the whole track), else BPMAnalyzer4
+    /// (first 60 s, integer, occasionally an octave off).
+    var displayBPM: Int? {
+        if let bpm, bpm > 0 { return bpm }   // some files carry TBPM = 0
+        if let grid = beatGrid { return Int(grid.bpm.rounded()) }
+        return analyzedBPM
+    }
+    var beatGrid: BeatGrid? { cueAnalysis?.grid }
+
+    /// Real-time drop recognition. A confident drop cue only *arms* the listener (from 2 bars before to 2
+    /// bars after it); the moment fires when the low end of what is playing actually jumps ≥ 6 dB over the
+    /// previous 2 s — never on the cue's clock alone. No jump inside the window: no moment.
+    private func listenForDrop(at now: TimeInterval) {
+        guard let listener = lowEndListener, !isDropMoment else { return }
+        let bar = beatGrid?.barPeriod ?? 2
+        guard let armed = cues.first(where: { $0.kind == .drop && !$0.isSuggestion && !firedDrops.contains($0.id)
+                                              && now >= $0.time - 2 * bar && now <= $0.time + 2 * bar }),
+              let rise = listener.rise(), rise >= Self.dropRiseDB
+        else { return }
+        firedDrops.insert(armed.id)
+        // The tap sees audio when it is rendered; it reaches the speakers one output latency later.
+        let latency = audioEngine.map { $0.outputNode.presentationLatency } ?? 0
+        dropMomentTask?.cancel()
+        dropMomentTask = Task { [weak self] in
+            if latency > 0 { try? await Task.sleep(nanoseconds: UInt64(latency * 1_000_000_000)) }
+            guard let self, !Task.isCancelled else { return }
+            self.dropEvents.send(armed)
+            self.isDropMoment = true
+            NSAccessibility.post(element: NSApp as Any, notification: .announcementRequested,
+                                 userInfo: [.announcement: "Drop", .priority: NSAccessibilityPriorityLevel.medium.rawValue])
+            try? await Task.sleep(nanoseconds: UInt64(Self.dropMomentDuration * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self.isDropMoment = false
+        }
+    }
+
+    /// Low-end jump that confirms a drop is happening (kick + bass coming back in).
+    static let dropRiseDB: Float = 6
+
+    private func resetCues() {
+        dropMomentTask?.cancel()
+        isDropMoment = false
+        firedDrops = []
+        lowEndListener?.reset()
+        cueTask?.cancel()
+        cueTask = nil
+        cueRequestedURL = nil
+        cueAnalysis = nil
+        cuesJustDetected = false
+        selectedCueID = nil
+    }
+
+    /// Runs once per file, after the waveform is on screen and a BPM is known (or BPM analysis gave up).
+    private func scheduleCueDetectionIfReady() {
+        guard let url = currentURL, cueRequestedURL != url, !waveformSamples.isEmpty else { return }
+        cueRequestedURL = url
+        cueTask = Task { [weak self] in
+            let lookup = await CueStore.shared.analysis(for: url)
+            let stored = lookup?.analysis
+            // Current detector and a grid: use as is. Older detector, or only manual cues so far: detect again,
+            // keeping the manual cues.
+            if let lookup, lookup.isCurrent, let stored, stored.grid != nil {
+                guard let self, !Task.isCancelled, self.currentURL == url else { return }
+                self.cuesJustDetected = false
+                self.cueAnalysis = stored
+                self.addDebugLog("Loaded \(stored.cues.count) cached cues")
+                return
+            }
+            // The BPM hint only picks the tempo octave the user sees; wait briefly for it (it is usually
+            // set in the same pass as the waveform, or a few hundred ms later by BPMAnalyzer4).
+            var waited = 0
+            while let me = self, me.currentURL == url, me.displayBPM == nil,
+                  me.isAnalyzingBPM || waited < 5, waited < 100, !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                waited += 1
+            }
+            let hint = self?.displayBPM   // tag (> 0), else BPMAnalyzer4
+            let started = Date()
+            let detected = try? await Task.detached(priority: .utility) {
+                try CueDetector.analyze(url: url, bpmHint: hint.map(Double.init))
+            }.value
+            guard let self, !Task.isCancelled, self.currentURL == url, let detected else { return }
+            // Keep cues the user placed while detection ran (or before it ever ran).
+            let manual = (self.cueAnalysis?.cues ?? []) + (stored?.cues ?? [])
+            let result = detected.merging(manual: manual)
+            let edited = result.cues.contains(where: \.isManual)
+            self.cuesJustDetected = true
+            self.cueAnalysis = result
+            self.addDebugLog(String(format: "Cues: %d in %.2fs (grid %.2f BPM)", result.cues.count,
+                                    Date().timeIntervalSince(started), result.grid?.bpm ?? 0))
+            await CueStore.shared.store(result, edited: edited, for: url)
+        }
+    }
+
+    private func commitCueEdit(_ cues: [Cue]) {
+        guard let url = currentURL else { return }
+        let analysis = CueAnalysis(grid: cueAnalysis?.grid, cues: cues.sorted { $0.time < $1.time })
+        cuesJustDetected = false
+        cueAnalysis = analysis
+        Task { await CueStore.shared.store(analysis, edited: true, for: url) }
+    }
+
+    /// Snaps to the nearest downbeat when a grid exists (hold ⌥ to place freely).
+    func snappedCueTime(_ time: Double, snap: Bool = true) -> Double {
+        let clamped = min(max(0, time), duration)
+        guard snap, let grid = beatGrid else { return clamped }
+        return min(max(0, grid.nearestBarTime(to: clamped)), duration)
+    }
+
+    /// Adds a cue at the playhead. A cue already within half a bar is retyped instead of duplicated.
+    func addCue(kind: CueKind, snap: Bool = true) {
+        guard duration > 0 else { return }
+        let time = snappedCueTime(currentTime, snap: snap)
+        var list = cues
+        let tolerance = (beatGrid?.barPeriod ?? 2) / 2
+        if let i = list.firstIndex(where: { abs($0.time - time) < tolerance }) {
+            list[i].kind = kind
+            list[i].isManual = true
+            list[i].confidence = 1
+            selectedCueID = list[i].id
+        } else {
+            let cue = Cue(kind: kind, time: time, confidence: 1, isManual: true)
+            list.append(cue)
+            selectedCueID = cue.id
+        }
+        commitCueEdit(list)
+    }
+
+    func moveCue(id: UUID, to time: Double, snap: Bool) {
+        var list = cues
+        guard let i = list.firstIndex(where: { $0.id == id }) else { return }
+        list[i].time = snappedCueTime(time, snap: snap)
+        list[i].isManual = true
+        list[i].confidence = 1
+        commitCueEdit(list)
+    }
+
+    /// Deletes the selected cue, or the one nearest the playhead (within a bar) when nothing is selected.
+    func deleteCue() {
+        let tolerance = beatGrid?.barPeriod ?? 2
+        let target = selectedCueID.flatMap { id in cues.first { $0.id == id } }
+            ?? cues.min { abs($0.time - currentTime) < abs($1.time - currentTime) }.flatMap { abs($0.time - currentTime) <= tolerance ? $0 : nil }
+        guard let target else { return }
+        selectedCueID = nil
+        commitCueEdit(cues.filter { $0.id != target.id })
+    }
+
+    func jumpToCue(forward: Bool) {
+        let now = currentTime
+        let target = forward
+            ? cues.first { $0.time > now + 0.05 }
+            : cues.last { $0.time < now - 0.6 }   // small window so a double tap walks back past the cue just reached
+        guard let target else { return }
+        selectedCueID = target.id
+        seek(to: target.time)
+    }
+
     func stopAndReset() {
         let previousURL = currentURL
         stopPlayback()
@@ -1030,6 +1218,7 @@ final class AudioPlayerViewModel: ObservableObject {
         coloredWaveformTask?.cancel()
         qualityAnalysisTask?.cancel()
         cancelWaveformFamily(for: previousURL)
+        resetCues()
         duration = 0
         waveformSamples = []
         coloredWaveformData = nil

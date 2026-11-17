@@ -21,6 +21,10 @@ struct WindowConfigurator: NSViewRepresentable {
 
 extension View {
     func configureWindow(_ configure: @escaping (NSWindow) -> Void) -> some View {
+        #if MOCA_SNAPSHOT
+        self   // headless snapshot builds have no window to configure
+        #else
         background(WindowConfigurator(configure: configure))
+        #endif
     }
 }

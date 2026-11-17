@@ -19,6 +19,9 @@
 				<string>com.microsoft.waveform-audio</string>
 				<string>public.aac-audio</string>
 				<string>com.apple.m4a-audio</string>
+				<string>org.xiph.flac</string>
+				<string>public.aiff-audio</string>
+				<string>public.aifc-audio</string>
 			</array>
 		</dict>
 	</array>
