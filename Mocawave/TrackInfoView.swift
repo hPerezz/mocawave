@@ -110,8 +110,8 @@ private struct EnergyMeter: View {
 
 // MARK: - Sources
 
-/// Each source's mark: Apple uses the system Apple logo; Beatport and Deezer use a monogram in their brand
-/// colour (swap in the official logo assets here once licensed/provided); ours is a waveform; file tag a tag.
+/// Each source's mark: Apple = system Apple logo; Beatport = its official icon mark (vector); Deezer = its
+/// official heart; ours = a waveform; file tag = a document.
 private struct SourceIcon: View {
     let source: TrackInfo.Source
 
@@ -121,9 +121,13 @@ private struct SourceIcon: View {
             case "Apple Music":
                 Image(systemName: "apple.logo").font(.system(size: 10, weight: .semibold)).foregroundColor(.white.opacity(0.9))
             case "Beatport":
-                monogram("B", Color(red: 0.0, green: 0.86, blue: 0.56))
+                BeatportMark().fill(Color(red: 0.0, green: 0.86, blue: 0.56)).frame(width: 11, height: 13)
             case "Deezer":
-                monogram("D", Color(red: 0.64, green: 0.22, blue: 1.0))
+                if let heart = DeezerMark.image {
+                    Image(nsImage: heart).resizable().interpolation(.high).frame(width: 13, height: 13)
+                } else {
+                    monogram("D", Color(red: 0.64, green: 0.22, blue: 1.0))
+                }
             case "Our audio analysis":
                 Image(systemName: "waveform").font(.system(size: 10, weight: .bold)).foregroundColor(MocaTheme.Cue.drop)
             default:
@@ -209,7 +213,7 @@ private struct SourceDropdown: View {
         }
         .padding(MocaSpace.m)
         .frame(width: 240, alignment: .leading)
-        .fixedSize(horizontal: false, vertical: true)
+        .fixedSize()   // ideal size on both axes: the popover hugs its content
     }
 
     private var rows: [(String, String)] {
