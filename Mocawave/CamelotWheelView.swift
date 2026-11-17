@@ -388,6 +388,13 @@ struct SliceShape: InsettableShape {
 
 /// Reports the pointer position (top-left origin) while it is over the view, nil when it leaves.
 /// Hit-testing passes through, so taps still reach the slices underneath.
+#if MOCA_SNAPSHOT
+/// Headless snapshot builds: pointer tracking is a no-op.
+struct PointerTrackingView: View {
+    let onChange: (CGPoint?, CGSize) -> Void
+    var body: some View { Color.clear }
+}
+#else
 struct PointerTrackingView: NSViewRepresentable {
     let onChange: (CGPoint?, CGSize) -> Void
 
@@ -424,3 +431,4 @@ struct PointerTrackingView: NSViewRepresentable {
         }
     }
 }
+#endif

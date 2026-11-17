@@ -3,6 +3,14 @@ import SwiftUI
 
 // MARK: - Mouse tracking helper for macOS 12+
 
+#if MOCA_SNAPSHOT
+/// Headless snapshot builds (ImageRenderer cannot draw AppKit views): mouse tracking is a no-op.
+struct MouseTrackingView: View {
+    let onMove: (CGFloat) -> Void
+    let onExit: () -> Void
+    var body: some View { Color.clear }
+}
+#else
 struct MouseTrackingView: NSViewRepresentable {
     let onMove: (CGFloat) -> Void
     let onExit: () -> Void
@@ -49,6 +57,7 @@ struct MouseTrackingView: NSViewRepresentable {
         }
     }
 }
+#endif
 
 private enum WaveformResampler {
     static func resample(_ samples: [Float], to targetCount: Int) -> [Float] {
