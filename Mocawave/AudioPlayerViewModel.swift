@@ -43,6 +43,7 @@ final class AudioPlayerViewModel: ObservableObject {
     /// While true (mixer drawer open) the audio comes from the stems; otherwise from the file itself.
     @Published private(set) var isStemMixActive = false
     private let stemPlayer = StemPlayer()
+    private var currentStemSet: StemSet?
     /// "Start engine" (labels + stems agent), shared by the stems drawer and the labels footer.
     @Published private(set) var engineStart: EngineStartState = .idle
     private var engineTask: Task<Void, Never>?
@@ -1188,6 +1189,7 @@ final class AudioPlayerViewModel: ObservableObject {
         stemsTask?.cancel()
         stemsTask = nil
         stemPlayer.detach()
+        currentStemSet = nil
         stemLanes = []
         stemsModelName = nil
         stemsState = StemsState.initial
@@ -1228,6 +1230,7 @@ final class AudioPlayerViewModel: ObservableObject {
             return
         }
         stemsModelName = set.manifest.modelName
+        currentStemSet = set
         stemLanes = set.files.map { StemLane(kind: $0.kind, peaks: peaks[$0.kind] ?? [], rmsDb: $0.rmsDb) }
         stemsState = .ready
         addDebugLog("Stems: \(set.files.count) from \(set.manifest.modelName), aligned by \(offset) frames")
@@ -1364,6 +1367,27 @@ final class AudioPlayerViewModel: ObservableObject {
     func setStemVolume(_ kind: StemKind, _ volume: Double) {
         guard let i = stemLanes.firstIndex(where: { $0.kind == kind }) else { return }
         stemLanes[i].volume = min(max(volume, 0), 1.5)
+    }
+
+    /// Global M: mutes every lane, or unmutes them all when they already are.
+    func toggleMuteAllStems() {
+        let allMuted = !stemLanes.isEmpty && stemLanes.allSatisfy(\.isMuted)
+        for i in stemLanes.indices { stemLanes[i].isMuted = !allMuted }
+    }
+
+    /// Global S: solo clear.
+    func clearStemSolos() {
+        for i in stemLanes.indices { stemLanes[i].isSoloed = false }
+    }
+
+    /// What dragging / copying a lane exports (nil until the stems are loaded).
+    func stemExportRequest(_ kind: StemKind) -> StemExport.Request? {
+        guard let set = currentStemSet, let url = currentURL,
+              let file = set.files.first(where: { $0.kind == kind }) else { return nil }
+        let bpm = beatGrid?.bpm ?? displayBPM.map(Double.init)
+        return StemExport.Request(source: file.url, kind: kind, trackName: url.deletingPathExtension().lastPathComponent,
+                                  bpm: bpm.map { abs($0 - $0.rounded()) < 0.06 ? $0.rounded() : ($0 * 10).rounded() / 10 },
+                                  offsetFrames: stemPlayer.offsetFrames)
     }
 
     func resetStemMix() {

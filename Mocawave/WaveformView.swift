@@ -175,6 +175,8 @@ private enum WaveformResampler {
 struct WaveformSection: Equatable {
     var start: Double
     var color: Color
+    /// Cue letter (I B D R O) for rulers; nil where only the colour matters.
+    var label: String? = nil
 }
 
 struct WaveformView: View {

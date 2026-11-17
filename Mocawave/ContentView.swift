@@ -877,10 +877,8 @@ struct ContentView: View {
     private static let minimumWindowWidth: CGFloat = FeatureFlags.trackInfo ? 806 + TopBarStemsCell.width + 1 : 806
     private static let drawerInnerPadding: CGFloat = 12
     /// Lanes in the stems drawer use the strip's columns: under the play button / waveform box / mascot.
-    private static let stemColumns = StemLaneColumns(
-        leading: PlayPauseButton.size + controlRowSpacing - drawerInnerPadding,
-        trailing: coffeeSlotWidth + controlRowSpacing - drawerInnerPadding
-    )
+    /// DAW layout: track headers (name, M/S, fader) on the left, lanes to the drawer's right edge.
+    private static let stemColumns = StemLaneColumns(leading: StemLaneMetrics.headerWidth, trailing: 0)
     private static let supportedAudioContentTypes = ["mp3", "wav", "aac", "m4a", "flac", "aif", "aiff"].compactMap { UTType(filenameExtension: $0) }
 
     /// The tab this view shows; drawers and the Camelot selection are kept on it across tab switches.
@@ -1229,7 +1227,9 @@ struct ContentView: View {
         window.tabbingMode = .disallowed
         window.titlebarAppearsTransparent = true
         window.styleMask.insert(.fullSizeContentView)
-        window.isMovableByWindowBackground = true
+        // Moved by the tab strip's empty space (like a browser), not the background: with background
+        // moves on, dragging a stem fader (or any SwiftUI drag) dragged the whole window instead.
+        window.isMovableByWindowBackground = false
         window.isOpaque = false
         window.backgroundColor = .clear
         GlassBackdrop.install(in: window)   // frosted, blurs what is behind the window
@@ -1266,7 +1266,7 @@ struct ContentView: View {
     private var waveformSections: [WaveformSection] {
         guard viewModel.duration > 0 else { return [] }
         return viewModel.cues.filter { $0.kind != .cue }.sorted { $0.time < $1.time }
-            .map { WaveformSection(start: $0.time / viewModel.duration, color: $0.kind.color) }
+            .map { WaveformSection(start: $0.time / viewModel.duration, color: $0.kind.color, label: $0.kind.letter) }
     }
 
     // MARK: Drawers
@@ -1312,7 +1312,16 @@ struct ContentView: View {
                         toggleSolo: { viewModel.toggleStemSolo($0, exclusive: $1) },
                         setVolume: { viewModel.setStemVolume($0, $1) },
                         resetMix: { viewModel.resetStemMix() },
-                        startEngine: { viewModel.startLocalEngine() }
+                        startEngine: { viewModel.startLocalEngine() },
+                        muteAll: { viewModel.toggleMuteAllStems() },
+                        clearSolo: { viewModel.clearStemSolos() },
+                        exportFile: { kind in
+                            guard let request = viewModel.stemExportRequest(kind) else { return nil }
+                            do { return try StemExport.file(for: request) } catch {
+                                viewModel.addDebugLog("Stem export failed: \(error.localizedDescription)")
+                                return nil
+                            }
+                        }
                     ),
                     engine: viewModel.engineStart,
                     sections: waveformSections

@@ -6,5 +6,8 @@
     <true/>
     <key>com.apple.security.files.user-selected.read-only</key>
     <true/>
+    <!-- Stems dragged/copied into a DAW are exported to ~/Music/Mocawave/Stems. -->
+    <key>com.apple.security.assets.music.read-write</key>
+    <true/>
 </dict>
 </plist>

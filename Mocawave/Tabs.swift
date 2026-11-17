@@ -508,7 +508,10 @@ extension TabStore {
             }
         }
         group.notify(queue: .main) { [weak self] in
-            let found = urls.compactMap { $0 }
+            // Our own stem exports dragged back over the window (a lane drag that ended here) aren't tracks
+            // to open: without this, letting go of a stem over Mocawave opened it as a new tab.
+            let exports = StemExport.root.standardizedFileURL.path
+            let found = urls.compactMap { $0 }.filter { !$0.standardizedFileURL.resolvingSymlinksInPath().path.hasPrefix(exports) }
             let supported = Set(["mp3", "wav", "aac", "m4a", "flac", "aif", "aiff"])
             MainActor.assumeIsolated {
                 self?.open(urls: found.filter { supported.contains($0.pathExtension.lowercased()) })
