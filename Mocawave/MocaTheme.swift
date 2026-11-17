@@ -24,13 +24,13 @@ enum MocaTheme {
     }
 
     /// Section palette, shared by flags, the sectioned waveform and the mascot: drop red (energy peak),
-    /// build amber (tension), break blue (calm), intro/outro neutral slate (mixing zones). No green, so the
-    /// hardest pair for colour-blind users (red/green) never appears; every flag also carries a letter.
+    /// build amber (tension), break purple (calm), intro/outro blue (the app's default waveform blue, the
+    /// mixing zones). No green, so the red/green pair never appears; every flag also carries a letter.
     enum Cue {
-        static let introOutro = Color(red: 0.58, green: 0.64, blue: 0.72)
+        static let introOutro = Color(red: 0.23, green: 0.51, blue: 0.96)
         static let build = Color(red: 0.96, green: 0.70, blue: 0.10)
         static let drop = Color(red: 0.94, green: 0.27, blue: 0.27)
-        static let breakdown = Color(red: 0.23, green: 0.51, blue: 0.96)
+        static let breakdown = Color(red: 0.62, green: 0.38, blue: 0.98)
     }
 
     // MARK: Surfaces (glass)
