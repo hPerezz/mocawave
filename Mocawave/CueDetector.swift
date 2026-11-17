@@ -51,7 +51,10 @@ enum CueDetector {
     /// - Nothing follows the outro.
     /// - Two drops with no break between are one drop (the first, the arrival); same for two breaks.
     /// - A build only survives if a drop follows it before any break; only the last one is kept.
-    nonisolated static func enforceGrammar(_ sorted: [Cue], end: Double, lastDropIsOutro: Bool) -> [Cue] {
+    /// - A break shorter than a phrase (`minimumBreak`, 8 bars) before the next drop is a fill: the break and
+    ///   that drop both go, and the drop section simply continues.
+    nonisolated static func enforceGrammar(_ sorted: [Cue], end: Double, lastDropIsOutro: Bool,
+                                           minimumBreak: Double = 0) -> [Cue] {
         var cues = sorted
         if lastDropIsOutro, let lastDrop = cues.lastIndex(where: { $0.kind == .drop }),
            cues[lastDrop].time >= end * 0.75,
@@ -83,10 +86,32 @@ enum CueDetector {
                 state = .afterBreak
             case .outro:
                 out.append(cue)
-                return out
+                return removingShortBreaks(out, minimumBreak: minimumBreak)
             }
         }
-        return out
+        return removingShortBreaks(out, minimumBreak: minimumBreak)
+    }
+
+    private nonisolated static func removingShortBreaks(_ cues: [Cue], minimumBreak: Double) -> [Cue] {
+        guard minimumBreak > 0 else { return cues }
+        var out: [Cue] = []
+        var skipNextDropID: UUID?
+        for (i, cue) in cues.enumerated() {
+            if cue.id == skipNextDropID { continue }
+            if cue.kind == .breakdown,
+               let next = cues[(i + 1)...].first(where: { $0.kind == .drop || $0.kind == .breakdown || $0.kind == .outro }),
+               next.kind == .drop, next.time - cue.time < minimumBreak {
+                skipNextDropID = next.id
+                // A build between them belonged to this non-break too.
+                continue
+            }
+            out.append(cue)
+        }
+        // Builds orphaned by a removed drop go as well.
+        return out.enumerated().filter { i, cue in
+            guard cue.kind == .build else { return true }
+            return out[(i + 1)...].first(where: { $0.kind != .build && $0.kind != .cue })?.kind == .drop
+        }.map(\.element)
     }
 
     // MARK: - 0. When to show cues at all
@@ -488,7 +513,8 @@ enum CueDetector {
         for b in drops {
             let lead = approach(b)
             var placedBuild = false
-            let window = max(b - min(32, lead), 1)..<max(b - 2, 1)
+            let lower = max(b - min(32, lead), 1), upper = max(b - 2, 1)
+            let window = lower < upper ? lower..<upper : upper..<upper   // run-up shorter than 3 bars: none
             // Step = total energy rise, or half the low-end rise (the kick coming back moves the low band a lot
             // more than the total).
             let steps = window.map { bar -> (bar: Int, rise: Float) in
@@ -530,7 +556,7 @@ enum CueDetector {
             let b = snap(e, direction: -1, energy)
             let contrast = meanDB(energy, b - 4..<b) - meanDB(energy, b..<b + 4)
             if k + 1 < peakRuns.count {
-                guard peakRuns[k + 1].start - e >= 4 else { continue }
+                guard peakRuns[k + 1].start - e >= 8 else { continue }   // shorter gap = a fill, not a break
                 breakBars.append(b)
                 cues.append(Cue(kind: .breakdown, time: time(b),
                                 confidence: clamp01(0.4 + 0.4 * clamp01((contrast - 2) / 6) + 0.2 * alignment(b))))
@@ -611,8 +637,31 @@ enum CueDetector {
         // The last drop is really the DJ outro when its section has no body (kick + bass without the melody):
         // mids ≥ 3 dB under the peak sections'.
         let peakMid = median(peakRuns.flatMap { Array($0.start..<min($0.end, n)) }.map { p.midDB[$0] })
-        let lastDropIsOutro = drops.max().map { meanDB(p.midDB, $0..<min($0 + 8, lastActive + 1)) < peakMid - 3 } ?? false
-        kept = enforceGrammar(kept.sorted { $0.time < $1.time }, end: time(lastActive), lastDropIsOutro: lastDropIsOutro)
+        let lastDropIsOutro = drops.max().map { meanDB(p.midDB, $0..<max($0, min($0 + 8, lastActive + 1))) < peakMid - 3 } ?? false
+        kept = enforceGrammar(kept.sorted { $0.time < $1.time }, end: time(lastActive), lastDropIsOutro: lastDropIsOutro,
+                              minimumBreak: grid.barPeriod * 7.5)   // an exact 8-bar break stays
+
+        // Every track ends in an outro (the DJ's mix-out block). If none was found: the last energy step down
+        // (total or low end, 4 bars after vs 4 before, ≥ 1.5 dB) in the final quarter after the last drop or
+        // break; failing that, the last 16-bar block. Snapped to the phrase grid like the rest.
+        if !kept.contains(where: { $0.kind == .outro }) {
+            let lastStructural = kept.filter { $0.kind == .drop || $0.kind == .breakdown }.map(\.time).max() ?? 0
+            let from = max(firstActive + 8, Int(Double(lastActive) * 0.75), grid.bar(at: lastStructural + 0.01) - p.firstBar + 8)
+            var outro: Int?
+            if from < lastActive - 4 {
+                let candidates = (from...(lastActive - 4)).map { bar -> (bar: Int, fall: Float) in
+                    let total = meanDB(energy, bar - 4..<bar) - meanDB(energy, bar..<bar + 4)
+                    let low = meanDB(p.lowDB, bar - 4..<bar) - meanDB(p.lowDB, bar..<bar + 4)
+                    return (bar, max(total, 0.5 * low))
+                }
+                outro = candidates.filter { $0.fall >= 1.5 }.last?.bar
+            }
+            let bar = phraseSnap(outro ?? max(from, lastActive - 16), kind: .outro)
+            if bar < lastActive - 2, time(bar) > lastStructural {
+                kept.append(Cue(kind: .outro, time: time(bar), confidence: outro == nil ? 0.5 : 0.65))
+                kept.sort { $0.time < $1.time }
+            }
+        }
 
         // Below 0.35 a cue is noise even as a hollow suggestion (tracks whose low end breathes without
         // real breaks produced alternating drop/break pairs every few bars).

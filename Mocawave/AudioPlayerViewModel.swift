@@ -58,6 +58,9 @@ final class AudioPlayerViewModel: ObservableObject {
     private var audioFile: AVAudioFile?
     private var startingFramePosition: AVAudioFramePosition = 0
     private var lufsMeter: LUFSMeter?
+    private var lowEndListener: LowEndListener?
+    /// Drops already celebrated in this pass (cleared for drops after a backward seek).
+    private var firedDrops: Set<UUID> = []
     private var analysisTask: Task<Void, Never>?
     private var bpmAnalysisTask: Task<Void, Never>?
     private var keyAnalysisTask: Task<Void, Never>?
@@ -317,6 +320,8 @@ final class AudioPlayerViewModel: ObservableObject {
 
         startingFramePosition = targetFrame
         lufsMeter?.reset()
+        lowEndListener?.reset()
+        firedDrops = firedDrops.filter { id in cues.first { $0.id == id }.map { $0.time < clamped } ?? false }
         updatePlaybackTelemetry { telemetry in
             telemetry.currentTime = clamped
             telemetry.realtimeLUFS = nil
@@ -640,8 +645,11 @@ final class AudioPlayerViewModel: ObservableObject {
         lufsMeter = meter
 
         let tapFormat = engine.mainMixerNode.outputFormat(forBus: 0)
+        let listener = LowEndListener(sampleRate: tapFormat.sampleRate)
+        lowEndListener = listener
         engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: tapFormat) { buffer, _ in
             meter.process(buffer: buffer)
+            listener.process(buffer: buffer)
         }
     }
 
@@ -650,6 +658,7 @@ final class AudioPlayerViewModel: ObservableObject {
             engine.mainMixerNode.removeTap(onBus: 0)
         }
         lufsMeter = nil
+        lowEndListener = nil
         clearRealtimePlaybackMetrics()
     }
 
@@ -1010,7 +1019,7 @@ final class AudioPlayerViewModel: ObservableObject {
                     let framePos = self.currentFramePosition()
                     let sampleRate = self.audioFile?.processingFormat.sampleRate ?? 44100
                     nextTelemetry.currentTime = Double(framePos) / sampleRate
-                    self.checkDropCrossing(from: self.playbackTelemetry.currentTime, to: nextTelemetry.currentTime)
+                    self.listenForDrop(at: nextTelemetry.currentTime)
                 }
                 if let meter = self.lufsMeter {
                     nextTelemetry.realtimeLUFS = meter.shortTermLUFS
@@ -1050,27 +1059,41 @@ final class AudioPlayerViewModel: ObservableObject {
     }
     var beatGrid: BeatGrid? { cueAnalysis?.grid }
 
-    /// Only natural forward playback counts (a tick is 50 ms): a seek that jumps past a drop does not fire.
-    private func checkDropCrossing(from previous: TimeInterval, to current: TimeInterval) {
-        let step = current - previous
-        guard step > 0, step < 0.5,
-              let drop = cues.first(where: { $0.kind == .drop && !$0.isSuggestion && $0.time > previous && $0.time <= current })
+    /// Real-time drop recognition. A confident drop cue only *arms* the listener (from 2 bars before to 2
+    /// bars after it); the moment fires when the low end of what is playing actually jumps ≥ 6 dB over the
+    /// previous 2 s — never on the cue's clock alone. No jump inside the window: no moment.
+    private func listenForDrop(at now: TimeInterval) {
+        guard let listener = lowEndListener, !isDropMoment else { return }
+        let bar = beatGrid?.barPeriod ?? 2
+        guard let armed = cues.first(where: { $0.kind == .drop && !$0.isSuggestion && !firedDrops.contains($0.id)
+                                              && now >= $0.time - 2 * bar && now <= $0.time + 2 * bar }),
+              let rise = listener.rise(), rise >= Self.dropRiseDB
         else { return }
-        dropEvents.send(drop)
+        firedDrops.insert(armed.id)
+        // The tap sees audio when it is rendered; it reaches the speakers one output latency later.
+        let latency = audioEngine.map { $0.outputNode.presentationLatency } ?? 0
         dropMomentTask?.cancel()
-        isDropMoment = true
-        NSAccessibility.post(element: NSApp as Any, notification: .announcementRequested,
-                             userInfo: [.announcement: "Drop", .priority: NSAccessibilityPriorityLevel.medium.rawValue])
         dropMomentTask = Task { [weak self] in
+            if latency > 0 { try? await Task.sleep(nanoseconds: UInt64(latency * 1_000_000_000)) }
+            guard let self, !Task.isCancelled else { return }
+            self.dropEvents.send(armed)
+            self.isDropMoment = true
+            NSAccessibility.post(element: NSApp as Any, notification: .announcementRequested,
+                                 userInfo: [.announcement: "Drop", .priority: NSAccessibilityPriorityLevel.medium.rawValue])
             try? await Task.sleep(nanoseconds: UInt64(Self.dropMomentDuration * 1_000_000_000))
             guard !Task.isCancelled else { return }
-            self?.isDropMoment = false
+            self.isDropMoment = false
         }
     }
+
+    /// Low-end jump that confirms a drop is happening (kick + bass coming back in).
+    static let dropRiseDB: Float = 6
 
     private func resetCues() {
         dropMomentTask?.cancel()
         isDropMoment = false
+        firedDrops = []
+        lowEndListener?.reset()
         cueTask?.cancel()
         cueTask = nil
         cueRequestedURL = nil
