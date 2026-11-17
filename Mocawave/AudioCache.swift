@@ -226,7 +226,10 @@ actor AudioCache {
         saveCache()
     }
 
-    private func cacheKey(for url: URL) -> String? {
+    private func cacheKey(for url: URL) -> String? { Self.trackKey(for: url) }
+
+    /// SHA256 of path + size + first 8 KB: identifies a track across caches (waveforms, stems).
+    nonisolated static func trackKey(for url: URL) -> String? {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
               let fileSize = attrs[.size] as? UInt64 else {
             return nil

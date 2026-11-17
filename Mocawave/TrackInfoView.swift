@@ -277,10 +277,12 @@ private struct SourceDropdown: View {
 
 /// Calm offline state: grey, no alarm colour, explains itself on hover; click checks again right away
 /// (it also retries on its own in the background).
-private struct OfflinePill: View {
+/// Quiet "something local isn't running" pill; click checks again. Shared by labels and stems.
+struct OfflinePill: View {
     let text: String
     let icon: String
     let help: String
+    var hint = "Checks again for the local track-info agent"
     let action: () -> Void
     @State private var hovered = false
 
@@ -299,6 +301,6 @@ private struct OfflinePill: View {
         .onHover { hovered = $0 }
         .help(help)
         .accessibilityLabel(text)
-        .accessibilityHint("Checks again for the local track-info agent")
+        .accessibilityHint(hint)
     }
 }

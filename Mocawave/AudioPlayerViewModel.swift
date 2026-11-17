@@ -35,6 +35,15 @@ final class AudioPlayerViewModel: ObservableObject {
     @Published private(set) var trackInfo: TrackInfoState = .idle
     private var trackInfoTask: Task<Void, Never>?
     private var trackInfoRequestedURL: URL?
+    /// Stems of the open track: cached (instant, offline) or separated on demand by the local agent.
+    @Published private(set) var stemsState: StemsState = StemsState.initial
+    /// Mixer lanes, in StemKind order. Edits apply to the players immediately.
+    @Published var stemLanes: [StemLane] = [] { didSet { stemPlayer.apply(stemLanes) } }
+    @Published private(set) var stemsModelName: String?
+    /// While true (mixer drawer open) the audio comes from the stems; otherwise from the file itself.
+    @Published private(set) var isStemMixActive = false
+    private let stemPlayer = StemPlayer()
+    private var stemsTask: Task<Void, Never>?
     /// True for `dropMomentDuration` after the playhead crosses a confident drop: the mascot's "CO2" moment.
     @Published private(set) var isDropMoment = false
     static let dropMomentDuration: TimeInterval = 2.5   // about one CO2 burst
@@ -205,6 +214,7 @@ final class AudioPlayerViewModel: ObservableObject {
         }
         resetCues()
         resetTrackInfo()
+        resetStems()
         waveformSamples = []
         coloredWaveformData = nil
         spectrogramImage = nil
@@ -260,6 +270,7 @@ final class AudioPlayerViewModel: ObservableObject {
         // Analysis first: if the output device isn't running, AVAudioPlayerNode.play() raises an ObjC
         // exception ("player did not see an IO cycle") that skips the rest of open().
         loadOrAnalyze(url: url)
+        loadCachedStems(for: url)
         play()
         if showSpectrogram {
             analyzeAndRenderSpectrogram(for: url)
@@ -295,7 +306,16 @@ final class AudioPlayerViewModel: ObservableObject {
                 handlePlaybackCompletion()
             }
         }
-        playerNode.play()
+        if isStemMixActive, stemPlayer.isAttached {
+            // Main node muted but still the clock; every node starts on the same host time.
+            let start = StemPlayer.sharedStartTime()
+            playerNode.volume = 0
+            stemPlayer.play(from: Double(startFrame) / audioFile.processingFormat.sampleRate, at: start)
+            playerNode.play(at: start)
+        } else {
+            playerNode.volume = 1
+            playerNode.play()
+        }
         isPlaying = true
         startPlaybackLoop()
     }
@@ -305,6 +325,7 @@ final class AudioPlayerViewModel: ObservableObject {
         playGeneration &+= 1  // invalidate any pending completion
         startingFramePosition = currentFramePosition()
         playerNode.stop()
+        stemPlayer.stop()
         isPlaying = false
         stopPlaybackLoop()
         clearRealtimePlaybackMetrics()
@@ -320,6 +341,7 @@ final class AudioPlayerViewModel: ObservableObject {
         if wasPlaying {
             playGeneration &+= 1  // invalidate any pending completion
             playerNode?.stop()
+            stemPlayer.stop()
             stopPlaybackLoop()
         }
 
@@ -408,7 +430,7 @@ final class AudioPlayerViewModel: ObservableObject {
               let playerTime = playerNode.playerTime(forNodeTime: nodeTime) else {
             return startingFramePosition
         }
-        return startingFramePosition + playerTime.sampleTime
+        return startingFramePosition + max(playerTime.sampleTime, 0)
     }
 
     private func extractBPM(from url: URL) {
@@ -1143,6 +1165,165 @@ final class AudioPlayerViewModel: ObservableObject {
         trackInfo = .idle
     }
 
+    // MARK: Stems
+
+    private func resetStems() {
+        stemsTask?.cancel()
+        stemsTask = nil
+        stemPlayer.detach()
+        stemLanes = []
+        stemsModelName = nil
+        stemsState = StemsState.initial
+        // The mix mode follows the drawer, which may stay open across tracks.
+    }
+
+    /// Cached stems come up by themselves (no agent, no network). On a cache miss, dev builds quietly ask the
+    /// agent whether it already has the track separated (GET only, never starts a separation) and pull it in;
+    /// otherwise the drawer offers the button.
+    private func loadCachedStems(for url: URL) {
+        stemsTask = Task { [weak self] in
+            if let set = await StemStore.shared.cached(for: url) {
+                await self?.loadStemSet(set, for: url)
+                return
+            }
+            guard FeatureFlags.trackInfo else { return }
+            let set = await StemClient.shared.existing(url) { [weak self] state in
+                await self?.applyStemsProgress(state, for: url)
+            }
+            guard let self, !Task.isCancelled, self.currentURL == url else { return }
+            if let set {
+                await self.loadStemSet(set, for: url)
+            } else if self.stemsState.isWorking {
+                self.stemsState = StemsState.initial   // download failed half-way: back to the button
+            }
+        }
+    }
+
+    private func loadStemSet(_ set: StemSet, for url: URL) async {
+        guard currentURL == url else { return }
+        stemsState = .loading
+        async let peaksResult = StemStore.shared.peaks(for: set)
+        async let offsetResult = StemStore.shared.alignment(for: set, source: url)
+        let (peaks, offset) = await (peaksResult, offsetResult)
+        guard !Task.isCancelled, currentURL == url, let audioEngine else { return }
+        guard stemPlayer.attach(set, to: audioEngine, offsetFrames: offset) else {
+            stemsState = .failed("Couldn't open the stems")
+            return
+        }
+        stemsModelName = set.manifest.modelName
+        stemLanes = set.files.map { StemLane(kind: $0.kind, peaks: peaks[$0.kind] ?? [], rmsDb: $0.rmsDb) }
+        stemsState = .ready
+        addDebugLog("Stems: \(set.files.count) from \(set.manifest.modelName), aligned by \(offset) frames")
+        if isStemMixActive, isPlaying { restartForMixChange() }
+    }
+
+    /// Separate the open track with the local agent (dev builds). Progress lands in `stemsState`.
+    func separateStems() {
+        guard FeatureFlags.trackInfo, let url = currentURL, !stemsState.isWorking, stemsState != .ready else { return }
+        stemsTask?.cancel()
+        stemsState = .queued(position: 0)
+        stemsTask = Task { [weak self] in
+            let result = await StemClient.shared.separate(url) { [weak self] state in
+                await self?.applyStemsProgress(state, for: url)
+            }
+            guard let self, !Task.isCancelled, self.currentURL == url else { return }
+            switch result {
+            case .success(let set):
+                await self.loadStemSet(set, for: url)
+            case .failure(.offline):
+                self.stemsState = .offline
+            case .failure(.cancelled):
+                self.stemsState = .idle
+            case .failure(let error):
+                self.stemsState = .failed(error.message)
+                self.addDebugLog("Stems failed: \(error.message)")
+            }
+        }
+    }
+
+    private func applyStemsProgress(_ state: StemsState, for url: URL) {
+        guard currentURL == url, stemsTask?.isCancelled == false else { return }
+        stemsState = state
+    }
+
+    /// Stops following the job (the agent keeps it, so asking again later picks it up where it is).
+    func cancelStems() {
+        stemsTask?.cancel()
+        stemsTask = nil
+        stemsState = StemsState.initial
+    }
+
+    /// The mixer drawer opened/closed: switch the audio source without stopping playback.
+    func setStemMixActive(_ active: Bool) {
+        guard isStemMixActive != active else { return }
+        isStemMixActive = active
+        guard stemPlayer.isAttached else { return }
+        if isPlaying { restartForMixChange() }
+    }
+
+    /// Re-schedules every node from the current position on one shared start time (≈50 ms, inaudible
+    /// as a gap because the main node keeps playing until the stems take over).
+    private func restartForMixChange() {
+        guard let playerNode, let audioFile else { return }
+        let rate = audioFile.processingFormat.sampleRate
+        if isStemMixActive {
+            let lead = 0.05
+            let start = StemPlayer.sharedStartTime(lead: lead)
+            stemPlayer.play(from: mainNodeSeconds(at: start, rate: rate) ?? Double(currentFramePosition()) / rate + lead, at: start)
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(lead * 1_000_000_000))
+                guard let self, self.isStemMixActive else { return }
+                playerNode.volume = 0
+            }
+        } else {
+            playerNode.volume = 1
+            stemPlayer.stop()
+        }
+    }
+
+    /// Where the (running) main node will be at host time `time`: its last render cycle, extrapolated.
+    /// Exact to the sample, unlike `currentFramePosition() + lead` (which is up to one IO buffer early).
+    private func mainNodeSeconds(at time: AVAudioTime, rate: Double) -> Double? {
+        guard let playerNode, let render = playerNode.lastRenderTime, render.isSampleTimeValid, render.isHostTimeValid,
+              let playerTime = playerNode.playerTime(forNodeTime: render), time.hostTime >= render.hostTime else { return nil }
+        let ahead = AVAudioTime.seconds(forHostTime: time.hostTime - render.hostTime)
+        return Double(startingFramePosition + playerTime.sampleTime) / playerTime.sampleRate + ahead
+    }
+
+    /// Anything moved off unity / muted / soloed (the drawer shows "Reset").
+    var isStemMixDirty: Bool {
+        stemLanes.contains { $0.volume != 1 || $0.isMuted || $0.isSoloed }
+    }
+
+    func toggleStemMute(_ kind: StemKind) {
+        guard let i = stemLanes.firstIndex(where: { $0.kind == kind }) else { return }
+        stemLanes[i].isMuted.toggle()
+    }
+
+    /// Click = toggle this lane's solo; exclusive = solo only this one (⌥-click).
+    func toggleStemSolo(_ kind: StemKind, exclusive: Bool = false) {
+        guard let i = stemLanes.firstIndex(where: { $0.kind == kind }) else { return }
+        let on = !stemLanes[i].isSoloed
+        if exclusive {
+            for j in stemLanes.indices { stemLanes[j].isSoloed = (j == i) && on }
+        } else {
+            stemLanes[i].isSoloed = on
+        }
+    }
+
+    func setStemVolume(_ kind: StemKind, _ volume: Double) {
+        guard let i = stemLanes.firstIndex(where: { $0.kind == kind }) else { return }
+        stemLanes[i].volume = min(max(volume, 0), 1.5)
+    }
+
+    func resetStemMix() {
+        for i in stemLanes.indices {
+            stemLanes[i].volume = 1
+            stemLanes[i].isMuted = false
+            stemLanes[i].isSoloed = false
+        }
+    }
+
     private func resetCues() {
         dropMomentTask?.cancel()
         isDropMoment = false
@@ -1274,6 +1455,7 @@ final class AudioPlayerViewModel: ObservableObject {
         cancelWaveformFamily(for: previousURL)
         resetCues()
         resetTrackInfo()
+        resetStems()
         duration = 0
         waveformSamples = []
         coloredWaveformData = nil
@@ -1295,6 +1477,7 @@ final class AudioPlayerViewModel: ObservableObject {
     private func stopPlayback() {
         playGeneration &+= 1  // invalidate any pending completion
         playerNode?.stop()
+        stemPlayer.stop()
         isPlaying = false
         stopPlaybackLoop()
         clearRealtimePlaybackMetrics()
@@ -1302,6 +1485,7 @@ final class AudioPlayerViewModel: ObservableObject {
 
     private func stopEngine() {
         disableRealtimeMeters()
+        stemPlayer.detach()
         audioEngine?.stop()
         audioEngine = nil
         playerNode = nil

@@ -861,6 +861,10 @@ struct ContentView: View {
     @State private var showDebugWindow = false
     @State private var openDrawers: Set<InspectorDrawer> = []
     @State private var camelotSelection: CamelotKey?
+    /// Applied stems panel height: follows the content (state, collapsed lanes) a beat later, together with
+    /// the window, so quick state hops (idle → loading → ready on a cached track) resize once.
+    @State private var stemsPanelHeight: CGFloat = StemLanesView.panelHeight(state: StemsState.initial, lanes: [])
+    @State private var stemsResizeTask: Task<Void, Never>?
     private let seekStep: TimeInterval = 5
     private static let controlRowSpacing: CGFloat = 12
     private static let topBarHeight: CGFloat = 22
@@ -872,7 +876,14 @@ struct ContentView: View {
     private static let titleBarInset: CGFloat = 30            // transparent title bar over the content
     // inset 30 + bar 22 + 8 + wave 84 + bottom 18, plus the footer row (18 + 8) only when track info is on.
     private static let windowContentHeight: CGFloat = FeatureFlags.trackInfo ? 188 : 162
-    private static let minimumWindowWidth: CGFloat = 806
+    // Dev builds carry the STEMS cell in the top bar.
+    private static let minimumWindowWidth: CGFloat = FeatureFlags.trackInfo ? 806 + TopBarStemsCell.width + 1 : 806
+    private static let drawerInnerPadding: CGFloat = 12
+    /// Lanes in the stems drawer use the strip's columns: under the play button / waveform box / mascot.
+    private static let stemColumns = StemLaneColumns(
+        leading: PlayPauseButton.size + controlRowSpacing - drawerInnerPadding,
+        trailing: coffeeSlotWidth + controlRowSpacing - drawerInnerPadding
+    )
     private static let supportedAudioContentTypes = ["mp3", "wav", "aac", "m4a", "flac", "aif", "aiff"].compactMap { UTType(filenameExtension: $0) }
 
     @MainActor
@@ -1084,9 +1095,7 @@ struct ContentView: View {
         .transaction { $0.animation = nil }
 
             ForEach(orderedOpenDrawers) { drawer in
-                DrawerPanel(drawer: drawer, onClose: { toggleDrawer(drawer) }) {
-                    drawerContent(drawer)
-                }
+                drawerPanel(drawer)
                 .padding(.top, InspectorDrawer.gap)
                 .transition(.asymmetric(
                     insertion: .opacity.combined(with: .offset(y: -12)),
@@ -1130,6 +1139,9 @@ struct ContentView: View {
         }
         .onChange(of: viewModel.keyAnalysisResult) { result in
             camelotSelection = TrackCamelot(result).primary
+        }
+        .onChange(of: targetStemsPanelHeight) { height in
+            scheduleStemsResize(to: height)
         }
         .fileImporter(
             isPresented: $isImportingAudio,
@@ -1175,6 +1187,15 @@ struct ContentView: View {
                 action: { toggleDrawer(.camelot) }
             )
             .frame(width: 148)
+            if viewModel.stemsState != .unavailable {
+                TopBarDividerView()
+                TopBarStemsCell(
+                    state: viewModel.stemsState,
+                    isOpen: openDrawers.contains(.stems),
+                    action: { toggleDrawer(.stems) }
+                )
+                .frame(width: TopBarStemsCell.width)
+            }
             Spacer(minLength: 0)
             TopBarDividerView()
             TopBarInstagramCell()
@@ -1242,14 +1263,66 @@ struct ContentView: View {
     }
 
     private var currentContentHeight: CGFloat {
-        Self.windowContentHeight + InspectorDrawer.extraHeight(for: orderedOpenDrawers)
+        Self.windowContentHeight + InspectorDrawer.extraHeight(for: orderedOpenDrawers, stemsHeight: stemsPanelHeight)
     }
 
     @ViewBuilder
-    private func drawerContent(_ drawer: InspectorDrawer) -> some View {
+    private func drawerPanel(_ drawer: InspectorDrawer) -> some View {
         switch drawer {
         case .camelot:
-            CamelotWheelView(track: TrackCamelot(viewModel.keyAnalysisResult), selection: $camelotSelection)
+            DrawerPanel(drawer: drawer, height: drawer.height(stems: stemsPanelHeight), onClose: { toggleDrawer(drawer) }) {
+                CamelotWheelView(track: TrackCamelot(viewModel.keyAnalysisResult), selection: $camelotSelection)
+            }
+        case .stems:
+            DrawerPanel(drawer: drawer, height: stemsPanelHeight, titleWidth: Self.stemColumns.leading,
+                        onClose: { toggleDrawer(drawer) }) {
+                StemsHeaderAccessory(
+                    state: viewModel.stemsState,
+                    modelName: viewModel.stemsModelName,
+                    isMixDirty: viewModel.isStemMixDirty,
+                    trailingWidth: Self.stemColumns.trailing,
+                    onCancel: { viewModel.cancelStems() },
+                    onReset: { withAnimation(MocaMotion.state) { viewModel.resetStemMix() } }
+                )
+            } content: {
+                StemLanesView(
+                    state: viewModel.stemsState,
+                    lanes: viewModel.stemLanes,
+                    progress: viewModel.progress,
+                    hasTrack: viewModel.duration > 0,
+                    columns: Self.stemColumns,
+                    actions: StemLaneActions(
+                        separate: { viewModel.separateStems() },
+                        cancel: { viewModel.cancelStems() },
+                        seek: { viewModel.seekToFraction($0) },
+                        toggleMute: { viewModel.toggleStemMute($0) },
+                        toggleSolo: { viewModel.toggleStemSolo($0, exclusive: $1) },
+                        setVolume: { viewModel.setStemVolume($0, $1) },
+                        resetMix: { viewModel.resetStemMix() }
+                    )
+                )
+            }
+        }
+    }
+
+    private var targetStemsPanelHeight: CGFloat {
+        StemLanesView.panelHeight(state: viewModel.stemsState, lanes: viewModel.stemLanes)
+    }
+
+    /// The stems panel changed size (separation started, lanes arrived, track changed): resize once things
+    /// settle, panel and window together, top edge fixed like every drawer.
+    private func scheduleStemsResize(to height: CGFloat) {
+        stemsResizeTask?.cancel()
+        guard openDrawers.contains(.stems) else {
+            stemsPanelHeight = height
+            return
+        }
+        stemsResizeTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            guard !Task.isCancelled, openDrawers.contains(.stems), stemsPanelHeight != height else { return }
+            let growing = height > stemsPanelHeight
+            withAnimation(growing ? MocaMotion.drawerIn : MocaMotion.drawerOut) { stemsPanelHeight = height }
+            resizeWindowForDrawers(opening: growing)
         }
     }
 
@@ -1259,10 +1332,16 @@ struct ContentView: View {
         if opening, drawer == .camelot, camelotSelection == nil {
             camelotSelection = TrackCamelot(viewModel.keyAnalysisResult).primary
         }
+        if drawer == .stems {
+            stemsResizeTask?.cancel()
+            if opening { stemsPanelHeight = targetStemsPanelHeight }
+        }
         withAnimation(opening ? MocaMotion.drawerIn : MocaMotion.drawerOut) {
             if opening { openDrawers.insert(drawer) } else { openDrawers.remove(drawer) }
         }
         resizeWindowForDrawers(opening: opening)
+        // The audio follows the mixer: open = stem mix, closed = the file itself.
+        if drawer == .stems { viewModel.setStemMixActive(opening) }
     }
 
     /// Keeps the top edge fixed (macOS origin is bottom-left) so the strip never jumps.
@@ -1433,6 +1512,17 @@ struct ContentView: View {
             toggleDrawer(.camelot)
             return true
         }
+        let stemsOpen = openDrawers.contains(.stems)
+        if flags.isEmpty, event.keyCode == 46, viewModel.stemsState != .unavailable { // 'm'
+            toggleDrawer(.stems)
+            return true
+        }
+        // 1–6 mute the lanes while the mixer is open (top row digits; nothing else uses them).
+        if stemsOpen, flags.isEmpty, viewModel.stemsState == .ready,
+           let lane = [18, 19, 20, 21, 23, 22].firstIndex(of: Int(event.keyCode)), lane < viewModel.stemLanes.count {
+            viewModel.toggleStemMute(viewModel.stemLanes[lane].kind)
+            return true
+        }
         if camelotOpen, flags.subtracting([.numericPad, .function]) == [.option] { // arrows carry numericPad/function
             switch event.keyCode {
             case 123: rotateCamelotSelection(by: -1); return true
@@ -1453,6 +1543,10 @@ struct ContentView: View {
             } else {
                 toggleDrawer(.camelot)
             }
+            return true
+        }
+        if stemsOpen, event.keyCode == 53 { // esc closes the mixer (after a selected cue)
+            toggleDrawer(.stems)
             return true
         }
 
