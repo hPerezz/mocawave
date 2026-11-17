@@ -18,8 +18,10 @@ struct TrackInfoFooter: View {
                 ProgressView().controlSize(.mini)
                 note(nil, position > 1 ? "Analysing… \(position - 1) track(s) ahead" : "Analysing the track and asking the stores…")
             case .offline:
-                note("bolt.horizontal.circle", "Track-info agent offline · run dj-stack/agent/run.sh")
-                retry
+                OfflinePill(text: "Labels offline",
+                            icon: "bolt.slash",
+                            help: "The local track-info agent isn't running (dj-stack/agent/run.sh). Everything else works offline; labels appear by themselves once it's up. Click to check now.",
+                            action: onRetry)
             case .failed(let reason):
                 note("exclamationmark.triangle", "No labels: \(reason)")
                 retry
@@ -56,6 +58,13 @@ struct TrackInfoFooter: View {
             .background(Capsule().fill(Color.white.opacity(0.05)))
             .accessibilityElement(children: .contain)
             .accessibilityLabel("Sources")
+            if info.storesOffline == true {
+                Image(systemName: "wifi.slash")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(.secondary)
+                    .help("No internet: showing our own analysis only. Store labels load when you're back online.")
+                    .accessibilityLabel("Stores offline")
+            }
             if let copy = copyLine(info) {
                 Rectangle().fill(Color.white.opacity(0.1)).frame(width: 1, height: 12).accessibilityHidden(true)
                 // Release credit, like the ℗ line on a record sleeve: year + label, quiet.
@@ -263,5 +272,33 @@ private struct SourceDropdown: View {
         add("BPM", source.bpm.map { $0.rounded() == $0 ? "\(Int($0))" : String(format: "%.1f", $0) })
         add("Key", source.key)
         return out
+    }
+}
+
+/// Calm offline state: grey, no alarm colour, explains itself on hover; click checks again right away
+/// (it also retries on its own in the background).
+private struct OfflinePill: View {
+    let text: String
+    let icon: String
+    let help: String
+    let action: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: MocaSpace.xs) {
+                Image(systemName: icon).font(.system(size: 9, weight: .semibold))
+                Text(text).font(.system(size: 10, weight: .medium))
+            }
+            .foregroundColor(.secondary)
+            .padding(.horizontal, MocaSpace.s)
+            .frame(height: 18)
+            .background(Capsule().fill(Color.white.opacity(hovered ? 0.1 : 0.05)))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .help(help)
+        .accessibilityLabel(text)
+        .accessibilityHint("Checks again for the local track-info agent")
     }
 }

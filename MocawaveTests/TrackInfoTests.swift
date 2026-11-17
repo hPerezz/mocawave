@@ -32,6 +32,20 @@ final class TrackInfoTests: XCTestCase {
         XCTAssertEqual(client.decode(Data(#"{"status":"unknown"}"#.utf8)), .queued(position: -1))
     }
 
+    func testStoresOfflineFlag() {
+        let json = #"{"status":"ready","info":{"labels":{},"sources":[{"name":"Our audio analysis","kind":"audio","genre":"House & Disco"}],"stores_offline":true}}"#
+        guard case .ready(let info) = TrackInfoClient.shared.decode(Data(json.utf8)) else { return XCTFail("expected ready") }
+        XCTAssertEqual(info.storesOffline, true)
+        XCTAssertEqual(info.sources.count, 1)
+    }
+
+    func testFeatureFlagOffByDefault() {
+        // Regular (offline-first) builds have no MOCA_TRACK_INFO flag; only the env var can turn it on.
+        #if !MOCA_TRACK_INFO
+        XCTAssertEqual(FeatureFlags.trackInfo, ProcessInfo.processInfo.environment["MOCA_TRACK_INFO"] == "1")
+        #endif
+    }
+
     func testLabelValueFormatting() {
         XCTAssertEqual(LabelValue.number(122).description, "122")
         XCTAssertEqual(LabelValue.number(114.8).description, "114.8")

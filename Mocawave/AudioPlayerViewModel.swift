@@ -1100,7 +1100,7 @@ final class AudioPlayerViewModel: ObservableObject {
     /// After one second of actual playback, queue the track with the agent (once per file). Opening a file
     /// never triggers network work by itself; skipping through tracks quickly doesn't flood the agent.
     private func requestTrackInfoIfPlaying(at now: TimeInterval) {
-        guard now >= 1, let url = currentURL, trackInfoRequestedURL != url else { return }
+        guard FeatureFlags.trackInfo, now >= 1, let url = currentURL, trackInfoRequestedURL != url else { return }
         trackInfoRequestedURL = url
         trackInfo = .queued(position: 0)
         trackInfoTask = Task { [weak self] in
@@ -1109,6 +1109,14 @@ final class AudioPlayerViewModel: ObservableObject {
             }
             guard let self, !Task.isCancelled, self.currentURL == url else { return }
             self.trackInfo = state
+            if state == .offline {
+                // Agent not running: check again quietly; labels appear by themselves once it's up.
+                try? await Task.sleep(nanoseconds: 20_000_000_000)
+                guard !Task.isCancelled, self.currentURL == url, self.trackInfo == .offline else { return }
+                self.trackInfoRequestedURL = nil
+                self.requestTrackInfoIfPlaying(at: max(self.currentTime, 1))
+                return
+            }
             if case .ready(let info) = state {
                 self.addDebugLog("Track info: \(info.labels.style?.value ?? "no style") (\(info.sources.count) sources)")
             }

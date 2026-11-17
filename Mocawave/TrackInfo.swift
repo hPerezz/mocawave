@@ -9,6 +9,8 @@ struct TrackInfo: Codable, Equatable, Sendable {
     var mix: String?
     var labels: Labels
     var sources: [Source]
+    /// The agent had no internet: only our own analysis is in; store labels come once back online.
+    var storesOffline: Bool?
 
     struct Labels: Codable, Equatable, Sendable {
         var style: Consensus?

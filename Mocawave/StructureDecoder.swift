@@ -166,7 +166,6 @@ enum StructureDecoder {
     /// bars before (and, at a finer scale, 4 vs 4) more than anywhere around them.
     nonisolated static func sectionBoundaries(_ p: CueDetector.BarProfile, firstActive: Int, lastActive: Int,
                                               phrase: Int) -> [Int] {
-        let n = p.lowDB.count
         // Weighted band vector per bar: the low end and overall level drive DJ sections the most.
         let weights: [Float] = [1.0, 0.6, 0.4, 0.8]
         func vector(_ i: Int) -> [Float] { [p.lowDB[i], p.midDB[i], p.highDB[i], p.totalDB[i]] }
