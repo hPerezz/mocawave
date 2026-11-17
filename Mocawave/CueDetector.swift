@@ -168,7 +168,11 @@ enum CueDetector {
         var carry: Float = 0
         var carryCount = 0
         while file.framePosition < file.length {
-            try file.read(into: buffer, frameCount: chunk)
+            do {
+                try file.read(into: buffer, frameCount: chunk)
+            } catch where file.length - file.framePosition <= Int64(sourceRate) || Double(file.length - file.framePosition) <= Double(file.length) * 0.02 {
+                break   // truncated MP3 tail: the audio ends here
+            }
             let n = Int(buffer.frameLength)
             guard n > 0, let data = buffer.floatChannelData else { break }
             for i in 0..<n {

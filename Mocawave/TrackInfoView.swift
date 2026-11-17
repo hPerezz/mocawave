@@ -26,36 +26,48 @@ struct TrackInfoFooter: View {
             case .ready(let info):
                 ready(info)
             }
-            Spacer(minLength: 0)
+            if case .ready = state {} else { Spacer(minLength: 0) }   // ready() places its own spacer
         }
         .frame(height: 18)
         .animation(MocaMotion.state, value: state)
     }
 
+    /// [genre · energy] ……… [sources] │ ℗ year label
+    /// Left = what the track is; right, flush with the waveform's right edge = who says so and the release
+    /// credit, separated by the same thin divider the header uses.
     @ViewBuilder
     private func ready(_ info: TrackInfo) -> some View {
-        item("tag", genre(info), help: "genre · \(info.labels.genre?.source ?? "consensus")", emphasis: true)
-        if let energy = info.labels.energy, case .number(let e) = energy.value {
-            EnergyMeter(level: Int(e)).help("energy \(Int(e))/10 · \(energy.source)")
-        }
-        HStack(spacing: MocaSpace.xs) {
-            ForEach(info.sources) { source in
-                SourceIconButton(source: source,
-                                 agrees: info.labels.style?.agree.contains(source.name) ?? false,
-                                 beatportURL: source.name == "Beatport" ? info.labels.beatportUrl.flatMap(URL.init(string:)) : nil)
+        HStack(spacing: MocaSpace.m) {
+            item("tag", genre(info), help: "genre · \(info.labels.genre?.source ?? "consensus")", emphasis: true)
+            if let energy = info.labels.energy, case .number(let e) = energy.value {
+                EnergyMeter(level: Int(e)).help("energy \(Int(e))/10 · \(energy.source)")
             }
         }
-        Spacer(minLength: MocaSpace.s)
-        if let copy = copyLine(info) {
-            // Release credit, like the ℗ line on a record sleeve: year + label, quiet, right-aligned.
-            Text(copy)
-                .font(.system(size: 9, weight: .medium))
-                .foregroundColor(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .help([info.labels.year.map { "year · \($0.source)" }, info.labels.label.map { "label · \($0.source)" }]
-                        .compactMap { $0 }.joined(separator: "\n"))
-                .accessibilityLabel("Released \(copy.dropFirst(2))")
+        Spacer(minLength: MocaSpace.m)
+        HStack(spacing: MocaSpace.s) {
+            HStack(spacing: MocaSpace.xxs) {
+                ForEach(info.sources) { source in
+                    SourceIconButton(source: source,
+                                     agrees: info.labels.style?.agree.contains(source.name) ?? false,
+                                     beatportURL: source.name == "Beatport" ? info.labels.beatportUrl.flatMap(URL.init(string:)) : nil)
+                }
+            }
+            .padding(.horizontal, MocaSpace.xxs)
+            .background(Capsule().fill(Color.white.opacity(0.05)))
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Sources")
+            if let copy = copyLine(info) {
+                Rectangle().fill(Color.white.opacity(0.1)).frame(width: 1, height: 12).accessibilityHidden(true)
+                // Release credit, like the ℗ line on a record sleeve: year + label, quiet.
+                Text(copy)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help([info.labels.year.map { "year · \($0.source)" }, info.labels.label.map { "label · \($0.source)" }]
+                            .compactMap { $0 }.joined(separator: "\n"))
+                    .accessibilityLabel("Released \(copy.dropFirst(2))")
+            }
         }
     }
 

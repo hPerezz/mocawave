@@ -869,7 +869,8 @@ struct ContentView: View {
     private static let coffeeWidth: CGFloat = VolumeFaceView.preferredWidth * coffeeScale
     private static let coffeeHeight: CGFloat = VolumeFaceView.preferredHeight * coffeeScale
     private static let coffeeSlotWidth: CGFloat = coffeeWidth - 14
-    private static let windowContentHeight: CGFloat = 200   // strip + track-info footer
+    private static let titleBarInset: CGFloat = 30            // transparent title bar over the content
+    private static let windowContentHeight: CGFloat = 188     // inset + bar 22 + 8 + wave 84 + 8 + footer 18 + 18
     private static let minimumWindowWidth: CGFloat = 806
     private static let supportedAudioContentTypes = ["mp3", "wav", "aac", "m4a", "flac", "aif", "aiff"].compactMap { UTType(filenameExtension: $0) }
 
@@ -1050,18 +1051,29 @@ struct ContentView: View {
             }
 
             // Track info: under the waveform and aligned with it (the labels describe the track drawn above).
-            if viewModel.duration > 0 {
+            // An error takes the same one-line slot (full text on hover) so it can never push the header away.
+            if let errorMessage = viewModel.errorMessage {
+                HStack(spacing: MocaSpace.xs) {
+                    Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 9, weight: .semibold))
+                    Text(errorMessage).font(.system(size: 10, weight: .medium)).lineLimit(1).truncationMode(.middle)
+                }
+                .foregroundColor(MocaTheme.Cue.drop)
+                .frame(height: 18)
+                .help(errorMessage)
+                .padding(.leading, PlayPauseButton.size + Self.controlRowSpacing + MocaSpace.xs)
+                .padding(.trailing, Self.coffeeSlotWidth + Self.controlRowSpacing + MocaSpace.s)
+            } else if viewModel.duration > 0 {
                 TrackInfoFooter(state: viewModel.trackInfo, onRetry: { viewModel.retryTrackInfo() })
+                    // Inset to the waveform box: starts under its first flag, ends under its right edge.
                     .padding(.leading, PlayPauseButton.size + Self.controlRowSpacing + MocaSpace.xs)
-                    .padding(.trailing, Self.coffeeSlotWidth + Self.controlRowSpacing)
+                    .padding(.trailing, Self.coffeeSlotWidth + Self.controlRowSpacing + MocaSpace.s)
             }
 
-            if let errorMessage = viewModel.errorMessage {
-                Text(errorMessage)
-                    .foregroundColor(.red)
-            }
         }
-        .frame(height: Self.windowContentHeight)
+        // Anchored under the title bar with a bottom margin equal to the side margins (the content used to be
+        // centred, leaving a double gap under the footer).
+        .padding(.top, Self.titleBarInset)
+        .frame(height: Self.windowContentHeight, alignment: .top)
         // The strip never inherits the drawer's spring: without this the waveform bars re-laid out with
         // the drawer animation every time the Camelot opened or closed.
         .transaction { $0.animation = nil }
