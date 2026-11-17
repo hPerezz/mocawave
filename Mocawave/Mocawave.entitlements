@@ -6,5 +6,8 @@
     <true/>
     <key>com.apple.security.files.user-selected.read-only</key>
     <true/>
+    <!-- Local track-info agent on 127.0.0.1 (dj-stack); no other hosts are contacted. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
 </dict>
 </plist>

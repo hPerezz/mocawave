@@ -41,6 +41,15 @@ enum MocaTheme {
     static let barBackground = Color.white.opacity(0.06)
 }
 
+/// Spacing tokens on a 4 pt grid (one scale for every margin and gap; no loose numbers in views).
+enum MocaSpace {
+    static let xxs: CGFloat = 2
+    static let xs: CGFloat = 4
+    static let s: CGFloat = 8
+    static let m: CGFloat = 12
+    static let l: CGFloat = 16
+}
+
 /// Motion tokens. Springs to arrive, faster ease-in to leave, short stagger; everything collapses to a
 /// short fade when the user enables Reduce Motion.
 enum MocaMotion {

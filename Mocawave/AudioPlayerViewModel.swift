@@ -31,6 +31,10 @@ final class AudioPlayerViewModel: ObservableObject {
     /// True when the cues were just detected (flags animate in); false when they came from the store.
     @Published private(set) var cuesJustDetected = false
     @Published var selectedCueID: UUID?
+    /// Style / energy / store labels from the local track-info agent; asked for once the track is playing.
+    @Published private(set) var trackInfo: TrackInfoState = .idle
+    private var trackInfoTask: Task<Void, Never>?
+    private var trackInfoRequestedURL: URL?
     /// True for `dropMomentDuration` after the playhead crosses a confident drop: the mascot's "CO2" moment.
     @Published private(set) var isDropMoment = false
     static let dropMomentDuration: TimeInterval = 2.5   // about one CO2 burst
@@ -200,6 +204,7 @@ final class AudioPlayerViewModel: ObservableObject {
             cancelWaveformFamily(for: previousURL)
         }
         resetCues()
+        resetTrackInfo()
         waveformSamples = []
         coloredWaveformData = nil
         spectrogramImage = nil
@@ -1020,6 +1025,7 @@ final class AudioPlayerViewModel: ObservableObject {
                     let sampleRate = self.audioFile?.processingFormat.sampleRate ?? 44100
                     nextTelemetry.currentTime = Double(framePos) / sampleRate
                     self.listenForDrop(at: nextTelemetry.currentTime)
+                    self.requestTrackInfoIfPlaying(at: nextTelemetry.currentTime)
                 }
                 if let meter = self.lufsMeter {
                     nextTelemetry.realtimeLUFS = meter.shortTermLUFS
@@ -1088,6 +1094,46 @@ final class AudioPlayerViewModel: ObservableObject {
 
     /// Low-end jump that confirms a drop is happening (kick + bass coming back in).
     static let dropRiseDB: Float = 6
+
+    // MARK: - Track info (queued after playback starts)
+
+    /// After one second of actual playback, queue the track with the agent (once per file). Opening a file
+    /// never triggers network work by itself; skipping through tracks quickly doesn't flood the agent.
+    private func requestTrackInfoIfPlaying(at now: TimeInterval) {
+        guard now >= 1, let url = currentURL, trackInfoRequestedURL != url else { return }
+        trackInfoRequestedURL = url
+        trackInfo = .queued(position: 0)
+        trackInfoTask = Task { [weak self] in
+            let state = await TrackInfoClient.shared.fetch(url) { [weak self] progress in
+                await self?.applyTrackInfoProgress(progress, for: url)
+            }
+            guard let self, !Task.isCancelled, self.currentURL == url else { return }
+            self.trackInfo = state
+            if case .ready(let info) = state {
+                self.addDebugLog("Track info: \(info.labels.style?.value ?? "no style") (\(info.sources.count) sources)")
+            }
+        }
+    }
+
+    private func applyTrackInfoProgress(_ progress: TrackInfoState, for url: URL) {
+        guard currentURL == url else { return }
+        trackInfo = progress
+    }
+
+    /// Ask again (e.g. after starting the agent).
+    func retryTrackInfo() {
+        trackInfoTask?.cancel()
+        trackInfoRequestedURL = nil
+        trackInfo = .idle
+        requestTrackInfoIfPlaying(at: max(currentTime, 1))
+    }
+
+    private func resetTrackInfo() {
+        trackInfoTask?.cancel()
+        trackInfoTask = nil
+        trackInfoRequestedURL = nil
+        trackInfo = .idle
+    }
 
     private func resetCues() {
         dropMomentTask?.cancel()
@@ -1219,6 +1265,7 @@ final class AudioPlayerViewModel: ObservableObject {
         qualityAnalysisTask?.cancel()
         cancelWaveformFamily(for: previousURL)
         resetCues()
+        resetTrackInfo()
         duration = 0
         waveformSamples = []
         coloredWaveformData = nil

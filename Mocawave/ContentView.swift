@@ -869,7 +869,7 @@ struct ContentView: View {
     private static let coffeeWidth: CGFloat = VolumeFaceView.preferredWidth * coffeeScale
     private static let coffeeHeight: CGFloat = VolumeFaceView.preferredHeight * coffeeScale
     private static let coffeeSlotWidth: CGFloat = coffeeWidth - 14
-    private static let windowContentHeight: CGFloat = 172
+    private static let windowContentHeight: CGFloat = 200   // strip + track-info footer
     private static let minimumWindowWidth: CGFloat = 806
     private static let supportedAudioContentTypes = ["mp3", "wav", "aac", "m4a", "flac", "aif", "aiff"].compactMap { UTType(filenameExtension: $0) }
 
@@ -1047,6 +1047,13 @@ struct ContentView: View {
                     .frame(width: Self.coffeeWidth, height: Self.coffeeHeight)
                 }
                 .frame(width: Self.coffeeSlotWidth, height: Self.mainControlHeight, alignment: .bottom)
+            }
+
+            // Track info: under the waveform and aligned with it (the labels describe the track drawn above).
+            if viewModel.duration > 0 {
+                TrackInfoFooter(state: viewModel.trackInfo, onRetry: { viewModel.retryTrackInfo() })
+                    .padding(.leading, PlayPauseButton.size + Self.controlRowSpacing + MocaSpace.xs)
+                    .padding(.trailing, Self.coffeeSlotWidth + Self.controlRowSpacing)
             }
 
             if let errorMessage = viewModel.errorMessage {
