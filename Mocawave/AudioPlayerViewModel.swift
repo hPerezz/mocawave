@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import Combine
 import CoreGraphics
@@ -30,6 +31,12 @@ final class AudioPlayerViewModel: ObservableObject {
     /// True when the cues were just detected (flags animate in); false when they came from the store.
     @Published private(set) var cuesJustDetected = false
     @Published var selectedCueID: UUID?
+    /// True for `dropMomentDuration` after the playhead crosses a confident drop: the mascot's "CO2" moment.
+    @Published private(set) var isDropMoment = false
+    static let dropMomentDuration: TimeInterval = 2.5   // about one CO2 burst
+    /// Fires on every drop crossing. Hook for driving a real CO2 rig later (OSC/MIDI); nothing listens yet.
+    let dropEvents = PassthroughSubject<Cue, Never>()
+    private var dropMomentTask: Task<Void, Never>?
     @Published var isAnalyzingKey: Bool = false
     @Published var spectrogramImage: CGImage? = nil
     @Published var isAnalyzingSpectrogram: Bool = false
@@ -1003,6 +1010,7 @@ final class AudioPlayerViewModel: ObservableObject {
                     let framePos = self.currentFramePosition()
                     let sampleRate = self.audioFile?.processingFormat.sampleRate ?? 44100
                     nextTelemetry.currentTime = Double(framePos) / sampleRate
+                    self.checkDropCrossing(from: self.playbackTelemetry.currentTime, to: nextTelemetry.currentTime)
                 }
                 if let meter = self.lufsMeter {
                     nextTelemetry.realtimeLUFS = meter.shortTermLUFS
@@ -1042,7 +1050,27 @@ final class AudioPlayerViewModel: ObservableObject {
     }
     var beatGrid: BeatGrid? { cueAnalysis?.grid }
 
+    /// Only natural forward playback counts (a tick is 50 ms): a seek that jumps past a drop does not fire.
+    private func checkDropCrossing(from previous: TimeInterval, to current: TimeInterval) {
+        let step = current - previous
+        guard step > 0, step < 0.5,
+              let drop = cues.first(where: { $0.kind == .drop && !$0.isSuggestion && $0.time > previous && $0.time <= current })
+        else { return }
+        dropEvents.send(drop)
+        dropMomentTask?.cancel()
+        isDropMoment = true
+        NSAccessibility.post(element: NSApp as Any, notification: .announcementRequested,
+                             userInfo: [.announcement: "Drop", .priority: NSAccessibilityPriorityLevel.medium.rawValue])
+        dropMomentTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.dropMomentDuration * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self?.isDropMoment = false
+        }
+    }
+
     private func resetCues() {
+        dropMomentTask?.cancel()
+        isDropMoment = false
         cueTask?.cancel()
         cueTask = nil
         cueRequestedURL = nil

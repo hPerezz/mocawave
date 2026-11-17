@@ -162,10 +162,18 @@ private enum WaveformResampler {
 
 // MARK: - WaveformView
 
+/// A stretch of the track coloured by the cue that opens it (fractions of the duration).
+struct WaveformSection: Equatable {
+    var start: Double
+    var color: Color
+}
+
 struct WaveformView: View {
     let samples: [Float]
     let progress: Double
     let onSeek: (Double) -> Void
+    /// Section colours (mono mode with cues): played bars in the section colour, the rest softer.
+    var sections: [WaveformSection] = []
 
     @State private var hoverX: CGFloat? = nil
 
@@ -184,13 +192,22 @@ struct WaveformView: View {
                     let clampedProgress = min(max(progress, 0), 1)
                     let progressIndex = min(Int(Double(barCount) * clampedProgress), barCount - 1)
 
+                    var sectionIndex = -1
                     for index in 0..<barCount {
                         let sample = CGFloat(renderSamples[index])
                         let barHeight = max(1, sample * size.height)
                         let x = CGFloat(index) * (barWidth + barSpacing)
                         let y = (size.height - barHeight) / 2
                         let rect = CGRect(x: x, y: y, width: barWidth, height: barHeight)
-                        let color = index <= progressIndex ? Color.accentColor : Color.secondary.opacity(0.45)
+                        let fraction = (Double(index) + 0.5) / Double(barCount)
+                        while sectionIndex + 1 < sections.count, sections[sectionIndex + 1].start <= fraction { sectionIndex += 1 }
+                        let played = index <= progressIndex
+                        let color: Color
+                        if sectionIndex >= 0 {
+                            color = sections[sectionIndex].color.opacity(played ? 1 : 0.38)
+                        } else {
+                            color = played ? Color.accentColor : Color.secondary.opacity(0.45)
+                        }
                         context.fill(Path(roundedRect: rect, cornerRadius: barWidth / 2), with: .color(color))
                     }
 

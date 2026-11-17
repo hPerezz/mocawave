@@ -43,6 +43,52 @@ enum CueDetector {
         return CueAnalysis(grid: grid, cues: cues)
     }
 
+    // MARK: - Grammar
+
+    /// An electronic track reads Intro → (Build) → Drop → Break → (Build) → Drop → … → Outro.
+    /// - The last drop is the outro when it sits in the final quarter, nothing but the end follows it, and
+    ///   its section has no body (kick + bass without the melody); an earlier outro becomes a break.
+    /// - Nothing follows the outro.
+    /// - Two drops with no break between are one drop (the first, the arrival); same for two breaks.
+    /// - A build only survives if a drop follows it before any break; only the last one is kept.
+    nonisolated static func enforceGrammar(_ sorted: [Cue], end: Double, lastDropIsOutro: Bool) -> [Cue] {
+        var cues = sorted
+        if lastDropIsOutro, let lastDrop = cues.lastIndex(where: { $0.kind == .drop }),
+           cues[lastDrop].time >= end * 0.75,
+           !cues[lastDrop...].contains(where: { $0.kind == .breakdown || $0.kind == .outro }) {
+            for i in cues.indices where cues[i].kind == .outro && i < lastDrop { cues[i].kind = .breakdown }
+            cues[lastDrop].kind = .outro
+        }
+
+        enum State { case start, afterDrop, afterBreak }
+        var state = State.start
+        var pendingBuild: Cue?
+        var out: [Cue] = []
+        for cue in cues {
+            switch cue.kind {
+            case .intro, .cue:
+                out.append(cue)
+            case .build:
+                pendingBuild = cue
+            case .drop:
+                guard state != .afterDrop else { continue }
+                if let build = pendingBuild { out.append(build) }
+                pendingBuild = nil
+                out.append(cue)
+                state = .afterDrop
+            case .breakdown:
+                guard state != .afterBreak else { continue }
+                pendingBuild = nil
+                out.append(cue)
+                state = .afterBreak
+            case .outro:
+                out.append(cue)
+                return out
+            }
+        }
+        return out
+    }
+
     // MARK: - 0. When to show cues at all
 
     static let minimumDuration: Double = 210        // 3:30 — radio edits / songs are shorter than club mixes
@@ -562,6 +608,12 @@ enum CueDetector {
         for cue in cues.sorted(by: { priority[$0.kind]! < priority[$1.kind]! }) {
             if !kept.contains(where: { abs($0.time - cue.time) < grid.barPeriod * 0.9 }) { kept.append(cue) }
         }
+        // The last drop is really the DJ outro when its section has no body (kick + bass without the melody):
+        // mids ≥ 3 dB under the peak sections'.
+        let peakMid = median(peakRuns.flatMap { Array($0.start..<min($0.end, n)) }.map { p.midDB[$0] })
+        let lastDropIsOutro = drops.max().map { meanDB(p.midDB, $0..<min($0 + 8, lastActive + 1)) < peakMid - 3 } ?? false
+        kept = enforceGrammar(kept.sorted { $0.time < $1.time }, end: time(lastActive), lastDropIsOutro: lastDropIsOutro)
+
         // Below 0.35 a cue is noise even as a hollow suggestion (tracks whose low end breathes without
         // real breaks produced alternating drop/break pairs every few bars).
         return kept.filter { $0.time < duration && ($0.kind == .intro || $0.confidence >= minimumConfidence) }

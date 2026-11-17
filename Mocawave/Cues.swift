@@ -108,7 +108,7 @@ struct CueAnalysis: Codable, Equatable, Sendable {
 /// entries the user edited are kept.
 actor CueStore {
     static let shared = CueStore()
-    static let detectorVersion = 8   // v8: build = biggest energy step in the run-up
+    static let detectorVersion = 9   // v9: section grammar (one drop per break, outro last)
 
     private struct Entry: Codable {
         var analysis: CueAnalysis

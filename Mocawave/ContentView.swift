@@ -167,6 +167,8 @@ struct VolumeFaceView: View {
     let isDisabled: Bool
     let isSleeping: Bool
     let isAngry: Bool
+    /// Drop moment: the whole mascot turns the drop red.
+    var isDropping: Bool = false
 
     static func normalizedActivity(for expression: Double) -> Double {
         let clampedExpression = min(max(expression, -1), 1)
@@ -200,11 +202,13 @@ struct VolumeFaceView: View {
     }
 
     private var strokeColor: Color {
-        Color.white.opacity(isDisabled ? 0.26 : 0.72)
+        if isDropping { return MocaTheme.Cue.drop }
+        return Color.white.opacity(isDisabled ? 0.26 : 0.72)
     }
 
     private var accentColor: Color {
-        Color.white.opacity(isDisabled ? 0.20 : 0.88)
+        if isDropping { return MocaTheme.Cue.drop }
+        return Color.white.opacity(isDisabled ? 0.20 : 0.88)
     }
 
     var body: some View {
@@ -268,7 +272,7 @@ struct VolumeFaceView: View {
                     )
                     path.addLine(to: CGPoint(x: mugRect.minX + mugWallInset, y: rimY))
                 }
-                .fill(Color.white.opacity(isDisabled ? 0.05 : 0.08))
+                .fill(isDropping ? MocaTheme.Cue.drop.opacity(0.35) : Color.white.opacity(isDisabled ? 0.05 : 0.08))
 
                 Path { path in
                     path.move(to: leftShoulder)
@@ -431,6 +435,7 @@ struct VolumeFaceView: View {
 enum CoffeeSteamStyle {
     case steam
     case sleep
+    case co2   // drop moment: dense white jet
 }
 
 struct CoffeeSteamView: View {
@@ -441,6 +446,7 @@ struct CoffeeSteamView: View {
 
     private let columnOffsets: [CGFloat] = [-0.16, 0.0, 0.16]
     private let sleepOffsets: [CGFloat] = [-0.10, 0.02, 0.16]
+    private let co2Offsets: [CGFloat] = [-0.2, -0.1, 0, 0.1, 0.2]
 
     var body: some View {
         GeometryReader { geometry in
@@ -485,6 +491,25 @@ struct CoffeeSteamView: View {
                                     Color.white.opacity(coreOpacity),
                                     style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round)
                                 )
+                        }
+                    case .co2:
+                        // Five fast, nearly straight columns with dashes racing upward: a CO2 burst.
+                        let lineWidth = max(3, cupHeight * 0.05)
+                        ForEach(co2Offsets.indices, id: \.self) { index in
+                            let x = size.width * (0.5 + co2Offsets[index])
+                            let sway = CGFloat(sin(time * 9 + Double(index) * 1.7)) * size.width * 0.012
+                            let top = startY - rise * (1.5 + 0.12 * CGFloat(sin(time * 7 + Double(index))))
+                            let jet = Path { path in
+                                path.move(to: CGPoint(x: x, y: startY))
+                                path.addLine(to: CGPoint(x: x + sway, y: top))
+                            }
+                            jet.stroke(Color.white.opacity(0.35),
+                                       style: StrokeStyle(lineWidth: lineWidth * 2.6, lineCap: .round))
+                                .blur(radius: lineWidth)
+                            jet.stroke(Color.white.opacity(0.9),
+                                       style: StrokeStyle(lineWidth: lineWidth, lineCap: .round,
+                                                          dash: [lineWidth * 2.2, lineWidth * 1.4],
+                                                          dashPhase: CGFloat(time * 140)))
                         }
                     case .sleep:
                         ForEach(sleepOffsets.indices, id: \.self) { index in
@@ -913,7 +938,8 @@ struct ContentView: View {
                                 progress: viewModel.progress,
                                 onSeek: { fraction in
                                     viewModel.seekToFraction(fraction)
-                                }
+                                },
+                                sections: waveformSections
                             )
                         }
                         if viewModel.waveformSamples.isEmpty {
@@ -999,20 +1025,25 @@ struct ContentView: View {
                 ZStack(alignment: .bottom) {
                     if viewModel.duration > 0 {
                         CoffeeSteamView(
-                            expression: viewModel.faceExpression,
+                            expression: viewModel.isDropMoment ? 1 : viewModel.faceExpression,
                             isDisabled: false,
                             cupHeight: Self.coffeeHeight,
-                            style: viewModel.isPlaying ? .steam : .sleep
+                            // Reduce Motion: the colour change alone marks the drop.
+                            style: viewModel.isDropMoment && !MocaMotion.reduceMotion ? .co2 : (viewModel.isPlaying ? .steam : .sleep)
                         )
                         .frame(width: Self.coffeeWidth, height: Self.mainControlHeight)
                     }
 
                     VolumeFaceView(
-                        expression: viewModel.faceExpression,
+                        expression: viewModel.isDropMoment ? 1 : viewModel.faceExpression,
                         isDisabled: false,
                         isSleeping: isSleepMode,
-                        isAngry: viewModel.duration == 0
+                        isAngry: viewModel.duration == 0,
+                        isDropping: viewModel.isDropMoment
                     )
+                    // In fast (120 ms), out slower (400 ms).
+                    .animation(viewModel.isDropMoment ? .easeOut(duration: 0.12) : .easeOut(duration: 0.4),
+                               value: viewModel.isDropMoment)
                     .frame(width: Self.coffeeWidth, height: Self.coffeeHeight)
                 }
                 .frame(width: Self.coffeeSlotWidth, height: Self.mainControlHeight, alignment: .bottom)
@@ -1171,6 +1202,13 @@ struct ContentView: View {
 
     private func requestAudioImport() {
         isImportingAudio = true
+    }
+
+    /// Sections for the mono waveform: each cue (except plain "C" markers) colours the stretch it opens.
+    private var waveformSections: [WaveformSection] {
+        guard viewModel.duration > 0 else { return [] }
+        return viewModel.cues.filter { $0.kind != .cue }.sorted { $0.time < $1.time }
+            .map { WaveformSection(start: $0.time / viewModel.duration, color: $0.kind.color) }
     }
 
     // MARK: Drawers
