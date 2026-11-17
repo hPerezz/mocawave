@@ -9,5 +9,8 @@
     <!-- DEV ONLY (MOCA_TRACK_INFO builds): talk to the local track-info agent on 127.0.0.1. -->
     <key>com.apple.security.network.client</key>
     <true/>
+    <!-- Stems dragged/copied into a DAW are exported to ~/Music/Mocawave/Stems. -->
+    <key>com.apple.security.assets.music.read-write</key>
+    <true/>
 </dict>
 </plist>

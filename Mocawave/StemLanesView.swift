@@ -21,11 +21,20 @@ struct StemLaneActions {
     var setVolume: (StemKind, Double) -> Void = { _, _ in }
     var resetMix: () -> Void = {}
     var startEngine: () -> Void = {}
+    var muteAll: () -> Void = {}
+    var clearSolo: () -> Void = {}
+    /// The stem as a WAV for a DAW (exported on first use); nil if it can't be made.
+    var exportFile: (StemKind) -> URL? = { _ in nil }
 }
 
 enum StemLaneMetrics {
-    static let laneHeight: CGFloat = 30
-    static let collapsedHeight: CGFloat = 14
+    static let laneHeight: CGFloat = 34
+    static let collapsedHeight: CGFloat = 16
+    /// Track header column (name, M/S, fader + dB), DAW-style on the left.
+    static let headerWidth: CGFloat = 176
+    static let headerGap: CGFloat = 8
+    /// Global row on top: ALL M/S + section ruler.
+    static let globalRowHeight: CGFloat = 16
     static let spacing: CGFloat = 4
     /// Idle / offline / failed: one message block.
     static let messageHeight: CGFloat = 46
@@ -95,14 +104,19 @@ struct StemLanesView: View {
     let columns: StemLaneColumns
     var actions = StemLaneActions()
     var engine: EngineStartState = .idle
+    /// The track's sections (from the cue flags above), tinted behind the lanes so the arrangement reads
+    /// across stems.
+    var sections: [WaveformSection] = []
 
     /// How many lanes have been revealed (they come in one by one when separation finishes).
     @State private var revealed: Int
     @State private var revealGeneration = 0
 
     init(state: StemsState, lanes: [StemLane], progress: Double, hasTrack: Bool, columns: StemLaneColumns,
-         actions: StemLaneActions = StemLaneActions(), engine: EngineStartState = .idle) {
+         actions: StemLaneActions = StemLaneActions(), engine: EngineStartState = .idle,
+         sections: [WaveformSection] = []) {
         self.engine = engine
+        self.sections = sections
         self.state = state
         self.lanes = lanes
         self.progress = progress
@@ -115,7 +129,8 @@ struct StemLanesView: View {
 
     static func contentHeight(state: StemsState, lanes: [StemLane]) -> CGFloat {
         if state == .ready, !lanes.isEmpty {
-            return lanes.reduce(0) { $0 + StemLaneMetrics.height(of: $1) } + StemLaneMetrics.spacing * CGFloat(lanes.count - 1)
+            return StemLaneMetrics.globalRowHeight + StemLaneMetrics.spacing
+                + lanes.reduce(0) { $0 + StemLaneMetrics.height(of: $1) } + StemLaneMetrics.spacing * CGFloat(lanes.count - 1)
         }
         if state.isWorking {
             let n = CGFloat(StemKind.allCases.count)
@@ -148,6 +163,8 @@ struct StemLanesView: View {
         let anySolo = lanes.contains { $0.isSoloed }
         return VStack(spacing: StemLaneMetrics.spacing) {
             if ready {
+                StemGlobalRow(allMuted: lanes.allSatisfy(\.isMuted), anySolo: anySolo, sections: sections,
+                              columns: columns, actions: actions)
                 ForEach(Array(lanes.enumerated()), id: \.element.kind) { index, lane in
                     StemLaneRow(lane: lane, index: index, anySolo: anySolo, isRevealed: index < revealed,
                                 progress: progress, columns: columns, actions: actions)
@@ -157,6 +174,12 @@ struct StemLanesView: View {
                     StemSkeletonRow(kind: kind, index: index, progress: state.displayProgress,
                                     height: StemLaneMetrics.laneHeight, columns: columns)
                 }
+            }
+        }
+        .background {
+            if ready, !sections.isEmpty {
+                SectionBackdrop(sections: sections, columns: columns)
+                    .transition(.opacity)
             }
         }
         .overlay {
@@ -512,7 +535,8 @@ struct StemSkeletonRow: View {
     }
 }
 
-/// One stem: name + M/S, its waveform (played part full colour), fader + dB.
+/// One stem, DAW-style: track header on the left (name, M/S, fader + dB), its waveform to the right
+/// (played part full colour). Drag the name into Ableton/Finder to get the stem as a WAV with the tempo.
 struct StemLaneRow: View {
     let lane: StemLane
     let index: Int
@@ -528,43 +552,70 @@ struct StemLaneRow: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            leftColumn.frame(width: columns.leading, alignment: .leading)
+            header
+                .padding(.horizontal, 6)
+                .frame(width: columns.leading - StemLaneMetrics.headerGap, height: height, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 4).fill(Color.white.opacity(0.04)))
+            Color.clear.frame(width: StemLaneMetrics.headerGap)
             waveform
-            rightColumn.frame(width: columns.trailing)
         }
         .frame(height: height)
         .opacity(collapsed ? 0.72 : 1)
+        .contextMenu { fileMenu }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(lane.kind.rawValue)
     }
 
     @ViewBuilder
-    private var leftColumn: some View {
+    private var header: some View {
         if collapsed {
-            HStack(spacing: 3) {
-                icon(size: 7)
+            HStack(spacing: 4) {
+                dragHandle(small: true)
+                Spacer(minLength: 2)
                 toggles(small: true)
+                fader(compact: true).frame(width: 46)
             }
         } else {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 3) {
-                    icon(size: 8)
-                    Text(lane.kind.title)
-                        .font(.system(size: 8, weight: .semibold, design: .monospaced))
-                        .foregroundColor(.white.opacity(isAudible ? 0.86 : 0.4))
-                        .lineLimit(1)
-                        .fixedSize()
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 4) {
+                    dragHandle(small: false)
+                    Spacer(minLength: 4)
+                    toggles(small: false)
                 }
-                toggles(small: false)
+                HStack(spacing: 6) {
+                    fader(compact: false)
+                    Text(StemLane.dbText(lane.volume) + " dB")
+                        .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.white.opacity(lane.volume == 1 ? 0.42 : 0.86))
+                        .lineLimit(1)
+                        .frame(width: 42, alignment: .trailing)
+                }
             }
         }
     }
 
-    private func icon(size: CGFloat) -> some View {
-        Image(systemName: lane.kind.symbol)
-            .font(.system(size: size, weight: .semibold))
-            .foregroundColor(lane.kind.color.opacity(isAudible ? 1 : 0.4))
-            .frame(width: 10)
+    /// Icon + name: the grip you drag into a DAW (or Finder).
+    private func dragHandle(small: Bool) -> some View {
+        StemDragHandle(kind: lane.kind, small: small, isAudible: isAudible, exportFile: actions.exportFile)
+    }
+
+    private func fader(compact: Bool) -> some View {
+        StemFader(volume: lane.volume, color: lane.kind.color, isAudible: isAudible, compact: compact) {
+            actions.setVolume(lane.kind, $0)
+        }
+    }
+
+    @ViewBuilder
+    private var fileMenu: some View {
+        Button("Copy \(lane.kind.rawValue.capitalized) as File (paste in Finder)") {
+            guard let url = actions.exportFile(lane.kind) else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.writeObjects([url as NSURL])
+        }
+        Button("Show \(lane.kind.rawValue.capitalized) in Finder") {
+            guard let url = actions.exportFile(lane.kind) else { return }
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        }
     }
 
     private func toggles(small: Bool) -> some View {
@@ -615,29 +666,6 @@ struct StemLaneRow: View {
 
     private var playedColor: Color { isAudible ? lane.kind.color : Color.white.opacity(0.26) }
     private var unplayedColor: Color { isAudible ? lane.kind.color.opacity(0.38) : Color.white.opacity(0.1) }
-
-    @ViewBuilder
-    private var rightColumn: some View {
-        if collapsed {
-            HStack(spacing: 0) {
-                Spacer(minLength: 8)
-                StemFader(volume: lane.volume, color: lane.kind.color, isAudible: isAudible, compact: true) {
-                    actions.setVolume(lane.kind, $0)
-                }
-            }
-        } else {
-            VStack(alignment: .trailing, spacing: 3) {
-                Text(StemLane.dbText(lane.volume) + " dB")
-                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
-                    .foregroundColor(.white.opacity(lane.volume == 1 ? 0.42 : 0.86))
-                    .lineLimit(1)
-                StemFader(volume: lane.volume, color: lane.kind.color, isAudible: isAudible, compact: false) {
-                    actions.setVolume(lane.kind, $0)
-                }
-            }
-            .padding(.leading, 8)
-        }
-    }
 }
 
 /// M / S square. ⌥-click passes `exclusive = true` (solo only this lane).
@@ -808,6 +836,133 @@ private struct PlayheadLayer: View {
             }
             Spacer(minLength: columns.trailing).frame(width: columns.trailing).allowsHitTesting(false)
         }
+        .accessibilityHidden(true)
+    }
+}
+
+
+/// Section markers behind the stem lanes: a faint wash of each section's colour (drop red, build amber,
+/// break purple, intro/outro blue) and a thin locator line where it starts. Only in the waveform column,
+/// under the lanes, so the waveforms stay the stems' own colours.
+struct SectionBackdrop: View, Equatable {
+    let sections: [WaveformSection]
+    let columns: StemLaneColumns
+
+    static let washOpacity = 0.10
+    static let lineOpacity = 0.45
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Color.clear.frame(width: columns.leading)
+            Canvas { context, size in
+                let sorted = sections.sorted { $0.start < $1.start }
+                for (i, section) in sorted.enumerated() {
+                    let x0 = size.width * CGFloat(min(max(section.start, 0), 1))
+                    let x1 = size.width * CGFloat(i + 1 < sorted.count ? min(max(sorted[i + 1].start, 0), 1) : 1)
+                    guard x1 > x0 else { continue }
+                    context.fill(Path(CGRect(x: x0, y: 0, width: x1 - x0, height: size.height)),
+                                 with: .color(section.color.opacity(Self.washOpacity)))
+                    context.fill(Path(CGRect(x: x0, y: 0, width: 1, height: size.height)),
+                                 with: .color(section.color.opacity(Self.lineOpacity)))
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+            Color.clear.frame(width: columns.trailing)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+
+/// The lane's name as a drag source: drop it in Ableton (or Finder) and the stem arrives as a WAV,
+/// aligned with the track and carrying its tempo.
+struct StemDragHandle: View {
+    let kind: StemKind
+    let small: Bool
+    let isAudible: Bool
+    let exportFile: (StemKind) -> URL?
+    @State private var hovered = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: hovered ? "hand.draw" : kind.symbol)
+                .font(.system(size: small ? 7 : 8, weight: .semibold))
+                .foregroundColor(kind.color.opacity(isAudible ? 1 : 0.4))
+                .frame(width: 10)
+            Text(kind.title)
+                .font(.system(size: small ? 7 : 8, weight: .semibold, design: .monospaced))
+                .foregroundColor(.white.opacity(isAudible ? (hovered ? 1 : 0.86) : 0.4))
+                .lineLimit(1)
+                .fixedSize()
+        }
+        .padding(.vertical, 1)
+        .contentShape(Rectangle())
+        .onHover { inside in
+            hovered = inside
+            if inside { NSCursor.openHand.push() } else { NSCursor.pop() }
+        }
+        .onDrag {
+            guard let url = exportFile(kind) else { return NSItemProvider() }
+            let provider = NSItemProvider(object: url as NSURL)
+            provider.suggestedName = url.lastPathComponent
+            return provider
+        }
+        .help("Drag onto Ableton (or Finder): \(kind.rawValue) as a WAV aligned with the track, tempo included. Ableton doesn't paste files from the clipboard, so drag it.")
+        .accessibilityLabel("\(kind.rawValue) stem, draggable as a file")
+    }
+}
+
+/// Top row: ALL M (mute / unmute every lane) and S (solo clear), aligned with the lanes' M/S, and a ruler
+/// with the section letters over the lanes.
+struct StemGlobalRow: View {
+    let allMuted: Bool
+    let anySolo: Bool
+    let sections: [WaveformSection]
+    let columns: StemLaneColumns
+    let actions: StemLaneActions
+
+    var body: some View {
+        HStack(spacing: 0) {
+            HStack(spacing: 4) {
+                Text("ALL")
+                    .font(.system(size: 7.5, weight: .semibold, design: .monospaced))
+                    .foregroundColor(.secondary)
+                Spacer(minLength: 4)
+                MixToggle(letter: "M", isOn: allMuted, color: MocaTheme.Mix.mute, small: false,
+                          help: allMuted ? "Unmute all stems" : "Mute all stems") { _ in actions.muteAll() }
+                MixToggle(letter: "S", isOn: anySolo, color: MocaTheme.Mix.solo, small: false,
+                          help: anySolo ? "Clear solo" : "No stem soloed") { _ in actions.clearSolo() }
+                    .disabled(!anySolo)
+            }
+            .padding(.horizontal, 6)
+            .frame(width: columns.leading - StemLaneMetrics.headerGap, alignment: .leading)
+            Color.clear.frame(width: StemLaneMetrics.headerGap)
+            SectionRuler(sections: sections)
+        }
+        .frame(height: StemLaneMetrics.globalRowHeight)
+    }
+}
+
+/// Section letters at their start, like locators over an arrangement.
+private struct SectionRuler: View {
+    let sections: [WaveformSection]
+
+    var body: some View {
+        GeometryReader { geo in
+            ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
+                if let label = section.label {
+                    Text(label)
+                        .font(.system(size: 7, weight: .heavy, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.92))
+                        .frame(width: 11, height: 11)
+                        .background(RoundedRectangle(cornerRadius: 2).fill(section.color.opacity(0.85)))
+                        .offset(x: geo.size.width * CGFloat(min(max(section.start, 0), 1)) + 2,
+                                y: (geo.size.height - 11) / 2)
+                }
+            }
+        }
+        .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
 }
