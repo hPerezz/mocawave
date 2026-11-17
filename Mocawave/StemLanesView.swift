@@ -95,14 +95,19 @@ struct StemLanesView: View {
     let columns: StemLaneColumns
     var actions = StemLaneActions()
     var engine: EngineStartState = .idle
+    /// The track's sections (from the cue flags above), tinted behind the lanes so the arrangement reads
+    /// across stems.
+    var sections: [WaveformSection] = []
 
     /// How many lanes have been revealed (they come in one by one when separation finishes).
     @State private var revealed: Int
     @State private var revealGeneration = 0
 
     init(state: StemsState, lanes: [StemLane], progress: Double, hasTrack: Bool, columns: StemLaneColumns,
-         actions: StemLaneActions = StemLaneActions(), engine: EngineStartState = .idle) {
+         actions: StemLaneActions = StemLaneActions(), engine: EngineStartState = .idle,
+         sections: [WaveformSection] = []) {
         self.engine = engine
+        self.sections = sections
         self.state = state
         self.lanes = lanes
         self.progress = progress
@@ -157,6 +162,12 @@ struct StemLanesView: View {
                     StemSkeletonRow(kind: kind, index: index, progress: state.displayProgress,
                                     height: StemLaneMetrics.laneHeight, columns: columns)
                 }
+            }
+        }
+        .background {
+            if ready, !sections.isEmpty {
+                SectionBackdrop(sections: sections, columns: columns)
+                    .transition(.opacity)
             }
         }
         .overlay {
@@ -808,6 +819,40 @@ private struct PlayheadLayer: View {
             }
             Spacer(minLength: columns.trailing).frame(width: columns.trailing).allowsHitTesting(false)
         }
+        .accessibilityHidden(true)
+    }
+}
+
+
+/// Section markers behind the stem lanes: a faint wash of each section's colour (drop red, build amber,
+/// break purple, intro/outro blue) and a thin locator line where it starts. Only in the waveform column,
+/// under the lanes, so the waveforms stay the stems' own colours.
+struct SectionBackdrop: View, Equatable {
+    let sections: [WaveformSection]
+    let columns: StemLaneColumns
+
+    static let washOpacity = 0.10
+    static let lineOpacity = 0.45
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Color.clear.frame(width: columns.leading)
+            Canvas { context, size in
+                let sorted = sections.sorted { $0.start < $1.start }
+                for (i, section) in sorted.enumerated() {
+                    let x0 = size.width * CGFloat(min(max(section.start, 0), 1))
+                    let x1 = size.width * CGFloat(i + 1 < sorted.count ? min(max(sorted[i + 1].start, 0), 1) : 1)
+                    guard x1 > x0 else { continue }
+                    context.fill(Path(CGRect(x: x0, y: 0, width: x1 - x0, height: size.height)),
+                                 with: .color(section.color.opacity(Self.washOpacity)))
+                    context.fill(Path(CGRect(x: x0, y: 0, width: 1, height: size.height)),
+                                 with: .color(section.color.opacity(Self.lineOpacity)))
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+            Color.clear.frame(width: columns.trailing)
+        }
+        .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
 }

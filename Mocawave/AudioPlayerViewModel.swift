@@ -89,6 +89,19 @@ final class AudioPlayerViewModel: ObservableObject {
     private var playbackTask: Task<Void, Never>?
     private var isScrubbing: Bool = false
     private var currentURL: URL?
+    /// The open file (nil for an empty tab).
+    var loadedURL: URL? { currentURL }
+
+    #if MOCA_SNAPSHOT
+    /// Headless renders only: pretend a file is open/playing without touching audio.
+    func snapshotPretend(url: URL, playing: Bool = false, stems: StemsState? = nil) {
+        currentURL = url
+        fileName = url.lastPathComponent
+        duration = 300
+        isPlaying = playing
+        if let stems { stemsState = stems }
+    }
+    #endif
     // Keep App Sandbox access alive for the currently loaded file.
     private var securityScopedURL: URL?
     private var isAccessingSecurityScopedURL = false

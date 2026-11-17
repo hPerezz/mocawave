@@ -45,6 +45,10 @@ enum MocaTheme {
     static let panelStroke = Color.white.opacity(0.14)
     static let panelRadius: CGFloat = 12
     static let barBackground = Color.white.opacity(0.06)
+    /// Window chrome under the tabs (selected tab + top bar): one surface, so the tab flows into the bar.
+    static let chrome = Color.white.opacity(0.07)
+    static let chromeHairline = Color.white.opacity(0.10)
+    static let tabSelected = chrome
 }
 
 /// Spacing tokens on a 4 pt grid (one scale for every margin and gap; no loose numbers in views).

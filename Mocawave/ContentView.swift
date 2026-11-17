@@ -134,11 +134,8 @@ struct DebugWindow: View {
 class FixedHeightWindowDelegate: NSObject, NSWindowDelegate {
     static var associatedKey = 0
     var fixedHeight: CGFloat
-    private let viewModel: AudioPlayerViewModel
-
-    init(fixedHeight: CGFloat, viewModel: AudioPlayerViewModel) {
+    init(fixedHeight: CGFloat) {
         self.fixedHeight = fixedHeight
-        self.viewModel = viewModel
     }
 
     func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
@@ -151,8 +148,7 @@ class FixedHeightWindowDelegate: NSObject, NSWindowDelegate {
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         MainActor.assumeIsolated {
-            viewModel.stopAndReset()
-            AudioOpenCoordinator.shared.unregister(window: sender)
+            TabStore.shared.closeAll()   // the red button closes the window and every tab in it
         }
         return true
     }
@@ -873,6 +869,7 @@ struct ContentView: View {
     private static let coffeeWidth: CGFloat = VolumeFaceView.preferredWidth * coffeeScale
     private static let coffeeHeight: CGFloat = VolumeFaceView.preferredHeight * coffeeScale
     private static let coffeeSlotWidth: CGFloat = coffeeWidth - 14
+    private static let stripHorizontalPadding: CGFloat = 14
     private static let titleBarInset: CGFloat = 30            // transparent title bar over the content
     // inset 30 + bar 22 + 8 + wave 84 + bottom 18, plus the footer row (18 + 8) only when track info is on.
     private static let windowContentHeight: CGFloat = FeatureFlags.trackInfo ? 188 : 162
@@ -886,9 +883,17 @@ struct ContentView: View {
     )
     private static let supportedAudioContentTypes = ["mp3", "wav", "aac", "m4a", "flac", "aif", "aiff"].compactMap { UTType(filenameExtension: $0) }
 
+    /// The tab this view shows; drawers and the Camelot selection are kept on it across tab switches.
+    private let tab: PlayerTab
+
     @MainActor
-    init(viewModel: AudioPlayerViewModel? = nil) {
-        _viewModel = StateObject(wrappedValue: viewModel ?? AudioPlayerViewModel())
+    init(tab: PlayerTab) {
+        self.tab = tab
+        _viewModel = StateObject(wrappedValue: tab.viewModel)
+        _openDrawers = State(initialValue: tab.openDrawers)
+        _camelotSelection = State(initialValue: tab.camelotSelection)
+        _stemsPanelHeight = State(initialValue: StemLanesView.panelHeight(state: tab.viewModel.stemsState,
+                                                                         lanes: tab.viewModel.stemLanes))
     }
 
     var body: some View {
@@ -1106,11 +1111,10 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .padding(.horizontal, 14)
+        // Tabs live in the title bar band (the 30 pt inset above the top bar), full window width.
+        .overlay(alignment: .top) { TabStrip(store: TabStore.shared) }
         .background(
             Group {
-                Button("") { requestAudioImport() }
-                    .keyboardShortcut("o", modifiers: [.command])
-                    .hidden()
                 Button("") { showDebugWindow.toggle() }
                     .keyboardShortcut("d", modifiers: [.command, .shift])
                     .hidden()
@@ -1119,25 +1123,23 @@ struct ContentView: View {
         .configureWindow { window in
             windowRef = window
             applyWindowStyle(window)
-            AudioOpenCoordinator.shared.register(window: window, viewModel: viewModel)
         }
         .preferredColorScheme(.dark)
         .ignoresSafeArea()
         .onDrop(of: [UTType.fileURL], isTargeted: $isDropTargeted) { providers in
-            viewModel.handleDrop(providers)
+            TabStore.shared.handleDrop(providers)   // into this tab if it's empty, else new tabs
         }
         .onAppear {
             installKeyMonitor()
         }
         .onDisappear {
             removeKeyMonitor()
-            if let windowRef {
-                AudioOpenCoordinator.shared.unregister(window: windowRef)
-            }
         }
         .onChange(of: viewModel.fileName) { newName in
             windowRef?.title = newName
         }
+        .onChange(of: openDrawers) { tab.openDrawers = $0 }
+        .onChange(of: camelotSelection) { tab.camelotSelection = $0 }
         .onChange(of: viewModel.keyAnalysisResult) { result in
             camelotSelection = TrackCamelot(result).primary
         }
@@ -1204,16 +1206,27 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity)
         .frame(height: Self.topBarHeight)
-        .background(MocaTheme.barBackground)
-        .overlay(
-            Rectangle()
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
-        )
-        .clipShape(Rectangle())
+        // Browser chrome: the selected tab and this bar are one surface, edge to edge (no box, no side
+        // gutters), closed by a single hairline towards the content. Cells keep their positions — only the
+        // band reaches past the strip's 14 pt margins to the window edges.
+        .background(alignment: .bottom) {
+            ZStack(alignment: .bottom) {
+                MocaTheme.chrome
+                MocaTheme.chromeHairline.frame(height: 1)
+            }
+            .padding(.horizontal, -Self.stripHorizontalPadding)
+        }
     }
 
+    /// Window chrome is set up once (first tab); every tab switch only fits the height to this tab's drawers.
     private func applyWindowStyle(_ window: NSWindow) {
-        window.titleVisibility = .visible
+        window.title = viewModel.loadedURL == nil ? "Mocawave" : viewModel.fileName
+        if window.delegate is FixedHeightWindowDelegate {
+            resizeWindowForDrawers(opening: true, animated: false)
+            return
+        }
+        window.titleVisibility = .hidden   // the tab strip is the title
+        window.tabbingMode = .disallowed
         window.titlebarAppearsTransparent = true
         window.styleMask.insert(.fullSizeContentView)
         window.isMovableByWindowBackground = true
@@ -1221,7 +1234,6 @@ struct ContentView: View {
         window.backgroundColor = .clear
         GlassBackdrop.install(in: window)   // frosted, blurs what is behind the window
         window.appearance = NSAppearance(named: .darkAqua)
-        window.title = viewModel.fileName
 
         let contentHeight = currentContentHeight
         let currentContentWidth = window.contentRect(forFrameRect: window.frame).width
@@ -1233,7 +1245,7 @@ struct ContentView: View {
         window.maxSize = NSSize(width: .greatestFiniteMagnitude, height: contentHeight)
 
         // Lock vertical resize
-        let resizeDelegate = FixedHeightWindowDelegate(fixedHeight: contentHeight, viewModel: viewModel)
+        let resizeDelegate = FixedHeightWindowDelegate(fixedHeight: contentHeight)
         objc_setAssociatedObject(window, &FixedHeightWindowDelegate.associatedKey, resizeDelegate, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         window.delegate = resizeDelegate
 
@@ -1302,7 +1314,8 @@ struct ContentView: View {
                         resetMix: { viewModel.resetStemMix() },
                         startEngine: { viewModel.startLocalEngine() }
                     ),
-                    engine: viewModel.engineStart
+                    engine: viewModel.engineStart,
+                    sections: waveformSections
                 )
             }
         }
@@ -1348,7 +1361,7 @@ struct ContentView: View {
     }
 
     /// Keeps the top edge fixed (macOS origin is bottom-left) so the strip never jumps.
-    private func resizeWindowForDrawers(opening: Bool) {
+    private func resizeWindowForDrawers(opening: Bool, animated: Bool = true) {
         guard let window = windowRef else { return }
         let contentHeight = currentContentHeight
         let width = window.contentRect(forFrameRect: window.frame).width
@@ -1363,7 +1376,7 @@ struct ContentView: View {
         window.maxSize = NSSize(width: .greatestFiniteMagnitude, height: frameHeight)
         (window.delegate as? FixedHeightWindowDelegate)?.fixedHeight = contentHeight
 
-        let duration = opening ? MocaMotion.windowInDuration : MocaMotion.windowOutDuration
+        let duration = animated ? (opening ? MocaMotion.windowInDuration : MocaMotion.windowOutDuration) : 0
         guard duration > 0 else {
             window.setFrame(frame, display: true)
             return
