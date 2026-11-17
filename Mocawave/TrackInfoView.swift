@@ -38,9 +38,6 @@ struct TrackInfoFooter: View {
         if let energy = info.labels.energy, case .number(let e) = energy.value {
             EnergyMeter(level: Int(e)).help("energy \(Int(e))/10 · \(energy.source)")
         }
-        if let year = info.labels.year { item("calendar", year.value.description, help: "year · \(year.source)") }
-        if let label = info.labels.label { item("opticaldisc", label.value.description, help: "label · \(label.source)") }
-        Spacer(minLength: MocaSpace.s)
         HStack(spacing: MocaSpace.xs) {
             ForEach(info.sources) { source in
                 SourceIconButton(source: source,
@@ -48,6 +45,24 @@ struct TrackInfoFooter: View {
                                  beatportURL: source.name == "Beatport" ? info.labels.beatportUrl.flatMap(URL.init(string:)) : nil)
             }
         }
+        Spacer(minLength: MocaSpace.s)
+        if let copy = copyLine(info) {
+            // Release credit, like the ℗ line on a record sleeve: year + label, quiet, right-aligned.
+            Text(copy)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help([info.labels.year.map { "year · \($0.source)" }, info.labels.label.map { "label · \($0.source)" }]
+                        .compactMap { $0 }.joined(separator: "\n"))
+                .accessibilityLabel("Released \(copy.dropFirst(2))")
+        }
+    }
+
+    /// "℗ 2017 Einmusika Recordings" (either part may be missing).
+    private func copyLine(_ info: TrackInfo) -> String? {
+        let parts = [info.labels.year?.value.description, info.labels.label?.value.description].compactMap { $0 }
+        return parts.isEmpty ? nil : "℗ " + parts.joined(separator: " ")
     }
 
     /// Most specific genre a store gives (e.g. "Organic House"), else our consensus style.

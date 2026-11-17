@@ -28,6 +28,8 @@ final class TrackInfoTests: XCTestCase {
         XCTAssertEqual(client.decode(Data(#"{"status":"running","position":1}"#.utf8)), .queued(position: 1))
         XCTAssertEqual(client.decode(Data(#"{"status":"error","error":"boom"}"#.utf8)), .failed("boom"))
         XCTAssertEqual(client.decode(Data("not json".utf8)), .failed("unreadable response"))
+        // The agent doesn't know the path yet (POST lost): keep going and post again, never "failed"/"offline".
+        XCTAssertEqual(client.decode(Data(#"{"status":"unknown"}"#.utf8)), .queued(position: -1))
     }
 
     func testLabelValueFormatting() {

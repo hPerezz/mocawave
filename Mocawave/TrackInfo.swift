@@ -115,25 +115,31 @@ actor TrackInfoClient {
     init(base: URL = URL(string: "http://127.0.0.1:47321")!) {
         self.base = base
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 5
+        config.timeoutIntervalForRequest = 10
         config.waitsForConnectivity = false
         session = URLSession(configuration: config)
     }
 
     /// Asks for `url`'s info, reporting progress, until ready / offline / failed (or the task is cancelled).
+    /// "Busy" (a timeout while the agent analyses) and "not registered yet" (the agent doesn't know the path,
+    /// e.g. the POST was lost) both mean: keep going. Only a refused connection is "offline".
+    private static let notRegistered = -1
+
     func fetch(_ url: URL, progress: @Sendable @escaping (TrackInfoState) async -> Void) async -> TrackInfoState {
-        var request = URLRequest(url: base.appendingPathComponent("track/info"))
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["path": url.path])
-        var state = await send(request)
-        let deadline = Date().addingTimeInterval(180)
-        while case .queued = state, !Task.isCancelled, Date() < deadline {
-            await progress(state)
+        var post = URLRequest(url: base.appendingPathComponent("track/info"))
+        post.httpMethod = "POST"
+        post.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        post.httpBody = try? JSONSerialization.data(withJSONObject: ["path": url.path])
+        var components = URLComponents(url: base.appendingPathComponent("track/info"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "path", value: url.path)]
+        let poll = URLRequest(url: components.url!)
+
+        var state = await send(post)
+        let deadline = Date().addingTimeInterval(240)
+        while case .queued(let position) = state, !Task.isCancelled, Date() < deadline {
+            await progress(.queued(position: max(position, 0)))
             try? await Task.sleep(nanoseconds: 1_500_000_000)
-            var components = URLComponents(url: base.appendingPathComponent("track/info"), resolvingAgainstBaseURL: false)!
-            components.queryItems = [URLQueryItem(name: "path", value: url.path)]
-            state = await send(URLRequest(url: components.url!))
+            state = await send(position == Self.notRegistered ? post : poll)
         }
         if case .queued = state { return .failed("timed out") }
         return state
@@ -154,8 +160,10 @@ actor TrackInfoClient {
             return decode(data)
         } catch let error as URLError where error.code == .networkConnectionLost && !retried {
             return await send(request, retried: true)
-        } catch let error as URLError where [.cannotConnectToHost, .networkConnectionLost, .timedOut, .cannotFindHost].contains(error.code) {
-            return .offline
+        } catch let error as URLError where [.cannotConnectToHost, .cannotFindHost].contains(error.code) {
+            return .offline                      // nothing listening: the agent isn't running
+        } catch let error as URLError where [.timedOut, .networkConnectionLost].contains(error.code) {
+            return .queued(position: 0)          // agent up but busy: keep waiting
         } catch {
             return .failed(error.localizedDescription)
         }
@@ -168,6 +176,7 @@ actor TrackInfoClient {
         switch envelope.status {
         case "ready": return envelope.info.map { .ready($0) } ?? .failed("empty response")
         case "queued", "running": return .queued(position: envelope.position ?? 1)
+        case "unknown": return .queued(position: Self.notRegistered)   // not registered yet: post again
         default: return .failed(envelope.error ?? envelope.status)
         }
     }
