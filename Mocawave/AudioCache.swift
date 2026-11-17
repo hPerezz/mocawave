@@ -8,7 +8,7 @@ actor AudioCache {
 
     /// Bump this version when the waveform analysis algorithm changes
     /// to invalidate all cached waveform data.
-    private static let cacheVersion = 7 // v7: pure-red override on bass-dominant RGB waveform
+    private static let cacheVersion = 8 // v8: BPM folded to the DJ range 70–180 (was 40–240)
 
     private struct VersionedCache: Codable {
         let version: Int

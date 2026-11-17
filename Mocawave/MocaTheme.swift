@@ -30,10 +30,12 @@ enum MocaTheme {
         static let breakdown = Color(red: 0.13, green: 0.77, blue: 0.37)
     }
 
-    // MARK: Surfaces
-    static let panelBackground = Color(NSColor.controlBackgroundColor)
-    static let panelStroke = Color.secondary.opacity(0.3)
+    // MARK: Surfaces (glass)
+    /// Wells (waveform box, drawers) sit on the blurred window as slightly darker translucent panes.
+    static let panelBackground = Color.black.opacity(0.28)
+    static let panelStroke = Color.white.opacity(0.14)
     static let panelRadius: CGFloat = 12
+    static let barBackground = Color.white.opacity(0.06)
 }
 
 /// Motion tokens. Springs to arrive, faster ease-in to leave, short stagger; everything collapses to a
@@ -60,4 +62,23 @@ enum MocaMotion {
     static let staggerStep: TimeInterval = 0.04
     /// Delay between cue flags appearing one by one (M2).
     static let cueStaggerStep: TimeInterval = 0.09
+}
+
+/// Frosted window background: blurs whatever is behind the window — the closest native material before
+/// macOS 26's Liquid Glass (which needs the macOS 26 SDK; add a `glassEffect` branch when building with it).
+///
+/// Installed at window level, below SwiftUI's hosting view. Inside a SwiftUI background the effect view
+/// lives in a layer-backed subtree and the window server never applies the behind-window blur: the window
+/// just turned transparent.
+final class GlassBackdrop: NSVisualEffectView {
+    static func install(in window: NSWindow, material: NSVisualEffectView.Material = .hudWindow) {
+        guard let content = window.contentView, let frame = content.superview,
+              !frame.subviews.contains(where: { $0 is GlassBackdrop }) else { return }
+        let backdrop = GlassBackdrop(frame: frame.bounds)
+        backdrop.material = material
+        backdrop.blendingMode = .behindWindow
+        backdrop.state = .active            // stay frosted when the window is not key
+        backdrop.autoresizingMask = [.width, .height]
+        frame.addSubview(backdrop, positioned: .below, relativeTo: content)
+    }
 }

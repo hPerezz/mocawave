@@ -73,9 +73,10 @@ struct CamelotWheelView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
             withAnimation(MocaMotion.pop) { appeared = true }
-            revealSequentially()
+            revealSequentially(from: selection ?? track.primary)
         }
-        .onChange(of: track) { _ in revealSequentially() }
+        // onChange's closure sees the previous view's `track` on macOS 12/13: use the new value it passes.
+        .onChange(of: track) { newTrack in revealSequentially(from: newTrack.primary) }
     }
 
     // MARK: Wheel
@@ -208,10 +209,6 @@ struct CamelotWheelView: View {
                 uncertaintyRow
             }
             Spacer(minLength: 0)
-            Text("Click a slice to see what mixes from it · ⌥← ⌥→ rotate · ⌥↑ ⌥↓ ring · Esc resets")
-                .font(.system(size: 8, weight: .medium, design: .monospaced))
-                .foregroundColor(.secondary)
-                .lineLimit(2)
         }
         .padding(.vertical, 4)
     }
@@ -303,12 +300,12 @@ struct CamelotWheelView: View {
     }
 
     /// Light compatible slices one by one, strongest relation first, so the order teaches the hierarchy.
-    private func revealSequentially() {
+    private func revealSequentially(from origin: CamelotKey?) {
         revealGeneration += 1
         let generation = revealGeneration
         litAll = false
         litKeys = []
-        guard let origin = selection ?? track.primary else { return }
+        guard let origin else { return }
         if MocaMotion.reduceMotion {
             litAll = true
             return

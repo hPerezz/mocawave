@@ -943,7 +943,20 @@ struct ContentView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, minHeight: Self.mainControlHeight, maxHeight: Self.mainControlHeight)
-                .background(Color(NSColor.controlBackgroundColor))
+                .overlay {
+                    if viewModel.duration > 0, !viewModel.waveformSamples.isEmpty {
+                        CueFlagsOverlay(
+                            cues: viewModel.cues,
+                            duration: viewModel.duration,
+                            grid: viewModel.beatGrid,
+                            animateIn: viewModel.cuesJustDetected,
+                            selectedID: $viewModel.selectedCueID,
+                            onSeek: { viewModel.seek(to: $0) },
+                            onMove: { id, time, snap in viewModel.moveCue(id: id, to: time, snap: snap) }
+                        )
+                    }
+                }
+                .background(MocaTheme.panelBackground)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .overlay(
                     RoundedRectangle(cornerRadius: 12)
@@ -1011,6 +1024,9 @@ struct ContentView: View {
             }
         }
         .frame(height: Self.windowContentHeight)
+        // The strip never inherits the drawer's spring: without this the waveform bars re-laid out with
+        // the drawer animation every time the Camelot opened or closed.
+        .transaction { $0.animation = nil }
 
             ForEach(orderedOpenDrawers) { drawer in
                 DrawerPanel(drawer: drawer, onClose: { toggleDrawer(drawer) }) {
@@ -1111,7 +1127,7 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity)
         .frame(height: Self.topBarHeight)
-        .background(Color(NSColor.controlBackgroundColor).opacity(0.82))
+        .background(MocaTheme.barBackground)
         .overlay(
             Rectangle()
                 .stroke(Color.white.opacity(0.12), lineWidth: 1)
@@ -1125,7 +1141,8 @@ struct ContentView: View {
         window.styleMask.insert(.fullSizeContentView)
         window.isMovableByWindowBackground = true
         window.isOpaque = false
-        window.backgroundColor = NSColor.black.withAlphaComponent(0.9)
+        window.backgroundColor = .clear
+        GlassBackdrop.install(in: window)   // frosted, blurs what is behind the window
         window.appearance = NSAppearance(named: .darkAqua)
         window.title = viewModel.fileName
 
@@ -1267,11 +1284,8 @@ struct ContentView: View {
     }
 
     private func bpmDisplayText(viewModel: AudioPlayerViewModel) -> String {
-        if let bpm = viewModel.bpm {
+        if let bpm = viewModel.displayBPM {
             return "\(bpm)"
-        }
-        if let analyzedBPM = viewModel.analyzedBPM {
-            return "\(analyzedBPM)"
         }
         return viewModel.isAnalyzingBPM ? "..." : "--"
     }
@@ -1366,6 +1380,10 @@ struct ContentView: View {
             default: break
             }
         }
+        if !camelotOpen, event.keyCode == 53, viewModel.selectedCueID != nil { // esc deselects a cue
+            viewModel.selectedCueID = nil
+            return true
+        }
         if camelotOpen, event.keyCode == 53 { // esc
             let trackKey = TrackCamelot(viewModel.keyAnalysisResult).primary
             if let trackKey, camelotSelection != trackKey {
@@ -1377,6 +1395,24 @@ struct ContentView: View {
         }
 
         guard viewModel.duration > 0 else { return false }
+
+        // Cues: ⇧←/⇧→ jump, ⌫ deletes, ⇧ + I B D R O C add at the playhead (snapped to the bar; ⇧⌥ = free).
+        // Shift is required so stray typing while the window has focus never drops cues.
+        let plainFlags = flags.subtracting([.numericPad, .function])
+        if plainFlags == [.shift], event.keyCode == 123 || event.keyCode == 124 {
+            viewModel.jumpToCue(forward: event.keyCode == 124)
+            return true
+        }
+        if plainFlags.isEmpty, event.keyCode == 51 || event.keyCode == 117 { // delete / forward delete
+            viewModel.deleteCue()
+            return true
+        }
+        if plainFlags == [.shift] || plainFlags == [.shift, .option],
+           let letter = event.charactersIgnoringModifiers, let kind = CueKind.forShortcut(letter) {
+            viewModel.addCue(kind: kind, snap: plainFlags == [.shift])
+            return true
+        }
+
         switch event.keyCode {
         case 49: // space
             viewModel.togglePlay()
