@@ -20,6 +20,7 @@ struct StemLaneActions {
     var toggleSolo: (StemKind, _ exclusive: Bool) -> Void = { _, _ in }
     var setVolume: (StemKind, Double) -> Void = { _, _ in }
     var resetMix: () -> Void = {}
+    var startEngine: () -> Void = {}
 }
 
 enum StemLaneMetrics {
@@ -93,13 +94,15 @@ struct StemLanesView: View {
     let hasTrack: Bool
     let columns: StemLaneColumns
     var actions = StemLaneActions()
+    var engine: EngineStartState = .idle
 
     /// How many lanes have been revealed (they come in one by one when separation finishes).
     @State private var revealed: Int
     @State private var revealGeneration = 0
 
     init(state: StemsState, lanes: [StemLane], progress: Double, hasTrack: Bool, columns: StemLaneColumns,
-         actions: StemLaneActions = StemLaneActions()) {
+         actions: StemLaneActions = StemLaneActions(), engine: EngineStartState = .idle) {
+        self.engine = engine
         self.state = state
         self.lanes = lanes
         self.progress = progress
@@ -200,11 +203,15 @@ struct StemLanesView: View {
             Group {
                 switch state {
                 case .offline:
-                    VStack(spacing: MocaSpace.xs) {
-                        OfflinePill(text: "Stems agent offline", icon: "bolt.slash",
-                                    help: "The local dj-stack agent isn't running (dj-stack/agent/run.sh). Separated tracks still open instantly. Click to try again.",
-                                    hint: "Tries the separation again", action: actions.separate)
-                        subline("Start dj-stack/agent/run.sh, then click to retry")
+                    // Not a network problem: the local engine just isn't running. One click starts it, then
+                    // the separation the user asked for carries on by itself.
+                    VStack(spacing: 5) {
+                        PrimaryDrawerButton(title: engine == .starting ? "Starting engine…" : "Start engine",
+                                            icon: "power", isBusy: engine == .starting,
+                                            isEnabled: engine != .starting,
+                                            help: "Starts the local stems engine on this Mac, then separates the track",
+                                            action: actions.startEngine)
+                        subline(engineSubline)
                     }
                 case .failed(let reason):
                     VStack(spacing: MocaSpace.xs) {
@@ -234,6 +241,15 @@ struct StemLanesView: View {
         }
         .frame(height: StemLaneMetrics.messageHeight)
         .transition(.opacity)
+    }
+
+    private var engineSubline: String {
+        switch engine {
+        case .starting: return "Loading on this Mac · no internet needed"
+        case .notInstalled: return "One-time setup: run tools/install-mocawave-agent.sh"
+        case .failed: return "It didn't start · details in dj-stack/agent/agent.log"
+        case .idle: return "The stems engine isn't running · it works offline, on this Mac"
+        }
     }
 
     private func subline(_ text: String) -> some View {
@@ -331,13 +347,32 @@ struct StemsHeaderAccessory: View {
 private struct SeparateButton: View {
     let isEnabled: Bool
     let action: () -> Void
+
+    var body: some View {
+        PrimaryDrawerButton(title: "Separate stems", icon: "slider.horizontal.3", isEnabled: isEnabled,
+                            help: "Split the track into vocals, drums, bass, guitar, piano and other", action: action)
+    }
+}
+
+/// The drawer's one primary action (Separate stems, Start engine).
+struct PrimaryDrawerButton: View {
+    let title: String
+    let icon: String
+    var isBusy = false
+    var isEnabled = true
+    let help: String
+    let action: () -> Void
     @State private var hovered = false
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 6) {
-                Image(systemName: "slider.horizontal.3").font(.system(size: 10, weight: .semibold))
-                Text("Separate stems").font(.system(size: 11, weight: .semibold))
+                if isBusy {
+                    ProgressView().controlSize(.mini).colorScheme(.dark)
+                } else {
+                    Image(systemName: icon).font(.system(size: 10, weight: .semibold))
+                }
+                Text(title).font(.system(size: 11, weight: .semibold))
             }
             .foregroundColor(.white)
             .padding(.horizontal, 14)
@@ -348,11 +383,11 @@ private struct SeparateButton: View {
         }
         .buttonStyle(.plain)
         .disabled(!isEnabled)
-        .opacity(isEnabled ? 1 : 0.4)
+        .opacity(isEnabled || isBusy ? 1 : 0.4)
         .onHover { hovered = $0 }
         .animation(MocaMotion.state, value: hovered)
-        .help("Split the track into vocals, drums, bass, guitar, piano and other")
-        .accessibilityLabel("Separate stems")
+        .help(help)
+        .accessibilityLabel(title)
     }
 }
 

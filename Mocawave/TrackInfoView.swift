@@ -8,6 +8,8 @@ import SwiftUI
 struct TrackInfoFooter: View {
     let state: TrackInfoState
     let onRetry: () -> Void
+    var engine: EngineStartState = .idle
+    var onStartEngine: () -> Void = {}
 
     var body: some View {
         HStack(spacing: MocaSpace.s) {
@@ -18,10 +20,18 @@ struct TrackInfoFooter: View {
                 ProgressView().controlSize(.mini)
                 note(nil, position > 1 ? "Analysing… \(position - 1) track(s) ahead" : "Analysing the track and asking the stores…")
             case .offline:
-                OfflinePill(text: "Labels offline",
-                            icon: "bolt.slash",
-                            help: "The local track-info agent isn't running (dj-stack/agent/run.sh). Everything else works offline; labels appear by themselves once it's up. Click to check now.",
-                            action: onRetry)
+                if engine == .starting {
+                    ProgressView().controlSize(.mini)
+                    note(nil, "Starting the labels engine…")
+                } else {
+                    OfflinePill(text: engine == .notInstalled ? "Labels engine not installed" : "Start labels engine",
+                                icon: "power",
+                                help: engine == .notInstalled
+                                    ? "One-time setup: run tools/install-mocawave-agent.sh. Everything else works without it."
+                                    : "The local labels engine isn't running. Click to start it on this Mac; store labels (Beatport, Apple, Deezer) need internet, our own analysis doesn't.",
+                                hint: "Starts the local labels engine",
+                                action: onStartEngine)
+                }
             case .failed(let reason):
                 note("exclamationmark.triangle", "No labels: \(reason)")
                 retry

@@ -1079,7 +1079,8 @@ struct ContentView: View {
 
             // Track info (dev feature): under the waveform and aligned with it.
             if FeatureFlags.trackInfo, viewModel.duration > 0 {
-                TrackInfoFooter(state: viewModel.trackInfo, onRetry: { viewModel.retryTrackInfo() })
+                TrackInfoFooter(state: viewModel.trackInfo, onRetry: { viewModel.retryTrackInfo() },
+                                engine: viewModel.engineStart, onStartEngine: { viewModel.startLocalEngine() })
                     // Inset to the waveform box: starts under its first flag, ends under its right edge.
                     .padding(.leading, PlayPauseButton.size + Self.controlRowSpacing + MocaSpace.xs)
                     .padding(.trailing, Self.coffeeSlotWidth + Self.controlRowSpacing + MocaSpace.s)
@@ -1298,8 +1299,10 @@ struct ContentView: View {
                         toggleMute: { viewModel.toggleStemMute($0) },
                         toggleSolo: { viewModel.toggleStemSolo($0, exclusive: $1) },
                         setVolume: { viewModel.setStemVolume($0, $1) },
-                        resetMix: { viewModel.resetStemMix() }
-                    )
+                        resetMix: { viewModel.resetStemMix() },
+                        startEngine: { viewModel.startLocalEngine() }
+                    ),
+                    engine: viewModel.engineStart
                 )
             }
         }

@@ -202,7 +202,7 @@ struct TopBarStemsCell: View {
 
     private var icon: String {
         switch state {
-        case .offline: return "bolt.slash"
+        case .offline: return "power"
         case .failed: return "exclamationmark.triangle"
         default: return "slider.horizontal.3"
         }
@@ -218,7 +218,7 @@ struct TopBarStemsCell: View {
 
     private var help: String {
         switch state {
-        case .offline: return "Stems agent offline (M)"
+        case .offline: return "Stems engine not running · open to start it (M)"
         case .failed(let m): return "Stems failed: \(m) (M)"
         case .ready: return "Stems ready (M)"
         default:
@@ -230,7 +230,7 @@ struct TopBarStemsCell: View {
     private var accessibilityStatus: String {
         switch state {
         case .ready: return "Ready"
-        case .offline: return "Agent offline"
+        case .offline: return "Engine not running"
         case .failed(let m): return "Failed: \(m)"
         default:
             if let p = state.displayProgress { return "\(state.stageLabel), \(Int(p * 100)) percent" }

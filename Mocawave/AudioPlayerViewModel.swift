@@ -43,6 +43,10 @@ final class AudioPlayerViewModel: ObservableObject {
     /// While true (mixer drawer open) the audio comes from the stems; otherwise from the file itself.
     @Published private(set) var isStemMixActive = false
     private let stemPlayer = StemPlayer()
+    /// "Start engine" (labels + stems agent), shared by the stems drawer and the labels footer.
+    @Published private(set) var engineStart: EngineStartState = .idle
+    private var engineTask: Task<Void, Never>?
+    private var engineAutoStartURL: URL?
     private var stemsTask: Task<Void, Never>?
     /// True for `dropMomentDuration` after the playhead crosses a confident drop: the mascot's "CO2" moment.
     @Published private(set) var isDropMoment = false
@@ -1232,12 +1236,45 @@ final class AudioPlayerViewModel: ObservableObject {
                 await self.loadStemSet(set, for: url)
             case .failure(.offline):
                 self.stemsState = .offline
+                // The click was a request to separate: start the engine right away (once per track), and
+                // startLocalEngine() resumes the separation when it's up.
+                if self.engineAutoStartURL != url, LocalEngine.isInstalled {
+                    self.engineAutoStartURL = url
+                    self.startLocalEngine()
+                }
             case .failure(.cancelled):
                 self.stemsState = .idle
             case .failure(let error):
                 self.stemsState = .failed(error.message)
                 self.addDebugLog("Stems failed: \(error.message)")
             }
+        }
+    }
+
+    /// Starts the local agent through its helper, waits for it, then picks up what was waiting on it:
+    /// a separation the user asked for, and the labels.
+    func startLocalEngine() {
+        guard engineStart != .starting else { return }
+        guard LocalEngine.requestStart() else {
+            engineStart = .notInstalled
+            return
+        }
+        engineStart = .starting
+        engineTask?.cancel()
+        engineTask = Task { [weak self] in
+            let up = await LocalEngine.waitUntilUp()
+            guard let self, !Task.isCancelled else { return }
+            guard up else {
+                self.engineStart = .failed
+                return
+            }
+            self.engineStart = .idle
+            self.addDebugLog("Local engine started")
+            if self.stemsState == .offline {
+                self.stemsState = .idle
+                self.separateStems()
+            }
+            if self.trackInfo == .offline { self.retryTrackInfo() }
         }
     }
 
