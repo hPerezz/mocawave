@@ -8,6 +8,8 @@ import SwiftUI
 struct TrackInfoFooter: View {
     let state: TrackInfoState
     let onRetry: () -> Void
+    var engine: EngineStartState = .idle
+    var onStartEngine: () -> Void = {}
 
     var body: some View {
         HStack(spacing: MocaSpace.s) {
@@ -18,10 +20,18 @@ struct TrackInfoFooter: View {
                 ProgressView().controlSize(.mini)
                 note(nil, position > 1 ? "Analysing… \(position - 1) track(s) ahead" : "Analysing the track and asking the stores…")
             case .offline:
-                OfflinePill(text: "Labels offline",
-                            icon: "bolt.slash",
-                            help: "The local track-info agent isn't running (dj-stack/agent/run.sh). Everything else works offline; labels appear by themselves once it's up. Click to check now.",
-                            action: onRetry)
+                if engine == .starting {
+                    ProgressView().controlSize(.mini)
+                    note(nil, "Starting the labels engine…")
+                } else {
+                    OfflinePill(text: engine == .notInstalled ? "Labels engine not installed" : "Start labels engine",
+                                icon: "power",
+                                help: engine == .notInstalled
+                                    ? "One-time setup: run tools/install-mocawave-agent.sh. Everything else works without it."
+                                    : "The local labels engine isn't running. Click to start it on this Mac; store labels (Beatport, Apple, Deezer) need internet, our own analysis doesn't.",
+                                hint: "Starts the local labels engine",
+                                action: onStartEngine)
+                }
             case .failed(let reason):
                 note("exclamationmark.triangle", "No labels: \(reason)")
                 retry
@@ -277,10 +287,12 @@ private struct SourceDropdown: View {
 
 /// Calm offline state: grey, no alarm colour, explains itself on hover; click checks again right away
 /// (it also retries on its own in the background).
-private struct OfflinePill: View {
+/// Quiet "something local isn't running" pill; click checks again. Shared by labels and stems.
+struct OfflinePill: View {
     let text: String
     let icon: String
     let help: String
+    var hint = "Checks again for the local track-info agent"
     let action: () -> Void
     @State private var hovered = false
 
@@ -299,6 +311,6 @@ private struct OfflinePill: View {
         .onHover { hovered = $0 }
         .help(help)
         .accessibilityLabel(text)
-        .accessibilityHint("Checks again for the local track-info agent")
+        .accessibilityHint(hint)
     }
 }

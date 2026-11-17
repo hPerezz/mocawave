@@ -23,6 +23,12 @@ enum MocaTheme {
         static let other = Color(red: 0.58, green: 0.64, blue: 0.72)
     }
 
+    /// Stem mixer toggles (DAW convention: mute and solo never share a colour; neither is the stem's own).
+    enum Mix {
+        static let mute = Color(red: 0.23, green: 0.51, blue: 0.96)
+        static let solo = Color(red: 0.96, green: 0.70, blue: 0.10)
+    }
+
     /// Section palette, shared by flags, the sectioned waveform and the mascot: drop red (energy peak),
     /// build amber (tension), break purple (calm), intro/outro blue (the app's default waveform blue, the
     /// mixing zones). No green, so the red/green pair never appears; every flag also carries a letter.
