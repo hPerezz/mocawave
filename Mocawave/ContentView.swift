@@ -869,7 +869,9 @@ struct ContentView: View {
     private static let coffeeWidth: CGFloat = VolumeFaceView.preferredWidth * coffeeScale
     private static let coffeeHeight: CGFloat = VolumeFaceView.preferredHeight * coffeeScale
     private static let coffeeSlotWidth: CGFloat = coffeeWidth - 14
-    private static let windowContentHeight: CGFloat = 172
+    private static let titleBarInset: CGFloat = 30            // transparent title bar over the content
+    // inset 30 + bar 22 + 8 + wave 84 + bottom 18, plus the footer row (18 + 8) only when track info is on.
+    private static let windowContentHeight: CGFloat = FeatureFlags.trackInfo ? 188 : 162
     private static let minimumWindowWidth: CGFloat = 806
     private static let supportedAudioContentTypes = ["mp3", "wav", "aac", "m4a", "flac", "aif", "aiff"].compactMap { UTType(filenameExtension: $0) }
 
@@ -1014,6 +1016,21 @@ struct ContentView: View {
                             .allowsHitTesting(false)
                     }
                 }
+                .overlay {
+                    // Errors: one quiet line over the waveform (full text on hover), never growing the window.
+                    if let errorMessage = viewModel.errorMessage {
+                        HStack(spacing: MocaSpace.xs) {
+                            Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 9, weight: .semibold))
+                            Text(errorMessage).font(.system(size: 10, weight: .medium)).lineLimit(1).truncationMode(.middle)
+                        }
+                        .foregroundColor(.white.opacity(0.92))
+                        .padding(.horizontal, MocaSpace.s)
+                        .frame(height: 20)
+                        .background(Capsule().fill(MocaTheme.Cue.drop.opacity(0.85)))
+                        .padding(.horizontal, MocaSpace.l)
+                        .help(errorMessage)
+                    }
+                }
                 .overlay(alignment: .trailing) {
                     if viewModel.duration == 0 {
                         CoffeeMessageArrowView()
@@ -1049,12 +1066,19 @@ struct ContentView: View {
                 .frame(width: Self.coffeeSlotWidth, height: Self.mainControlHeight, alignment: .bottom)
             }
 
-            if let errorMessage = viewModel.errorMessage {
-                Text(errorMessage)
-                    .foregroundColor(.red)
+            // Track info (dev feature): under the waveform and aligned with it.
+            if FeatureFlags.trackInfo, viewModel.duration > 0 {
+                TrackInfoFooter(state: viewModel.trackInfo, onRetry: { viewModel.retryTrackInfo() })
+                    // Inset to the waveform box: starts under its first flag, ends under its right edge.
+                    .padding(.leading, PlayPauseButton.size + Self.controlRowSpacing + MocaSpace.xs)
+                    .padding(.trailing, Self.coffeeSlotWidth + Self.controlRowSpacing + MocaSpace.s)
             }
+
         }
-        .frame(height: Self.windowContentHeight)
+        // Anchored under the title bar with a bottom margin equal to the side margins (the content used to be
+        // centred, leaving a double gap under the footer).
+        .padding(.top, Self.titleBarInset)
+        .frame(height: Self.windowContentHeight, alignment: .top)
         // The strip never inherits the drawer's spring: without this the waveform bars re-laid out with
         // the drawer animation every time the Camelot opened or closed.
         .transaction { $0.animation = nil }

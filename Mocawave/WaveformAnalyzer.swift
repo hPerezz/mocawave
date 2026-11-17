@@ -133,6 +133,11 @@ enum WaveformAnalyzer {
             self.sampleRate = Float(processingFormat.sampleRate)
         }
 
+        /// A read failure with less than a second (or 2 %) of the file left.
+        static func isTruncatedTail(remaining: Int64, total: Int64, sampleRate: Double) -> Bool {
+            remaining <= Int64(max(sampleRate, 1)) || Double(remaining) <= Double(total) * 0.02
+        }
+
         func decode(_ body: (UnsafePointer<Float>, Int) throws -> Void) throws {
             var chunkIndex = 0
             while true {
@@ -149,6 +154,11 @@ enum WaveformAnalyzer {
                     try autoreleasepool {
                         try audioFile.read(into: readBuffer, frameCount: requestedFrameCount)
                     }
+                } catch where Self.isTruncatedTail(remaining: remainingFrames, total: totalFrames,
+                                                     sampleRate: audioFile.processingFormat.sampleRate) {
+                    // MP3s often promise a few more frames than they hold (truncated last frame, padded
+                    // header): a failure in the last second is the end of the audio, not a broken file.
+                    break
                 } catch {
                     throw WaveformError.audioRead(
                         url: sourceURL,
