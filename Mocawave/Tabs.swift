@@ -280,12 +280,23 @@ private struct TabItem: View {
         HStack(spacing: 6) {
             statusIcon
                 .frame(width: 12)
-            Text(title)
-                .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
-                .foregroundColor(.white.opacity(isSelected ? 0.95 : (hovered ? 0.8 : 0.58)))
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            // Name truncates in the middle; the extension always shows (mp3 vs flac vs m4a matters here).
+            HStack(spacing: 0) {
+                Text(title)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .layoutPriority(0)
+                if let ext = fileExtension {
+                    Text("." + ext)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .opacity(0.55)
+                        .layoutPriority(1)
+                }
+            }
+            .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
+            .foregroundColor(.white.opacity(isSelected ? 0.95 : (hovered ? 0.8 : 0.58)))
+            .frame(maxWidth: .infinity, alignment: .leading)
             CloseTabButton(action: onClose)
                 .opacity(isSelected || hovered ? 1 : 0)
         }
@@ -304,13 +315,18 @@ private struct TabItem: View {
         .animation(MocaMotion.state, value: hovered)
         .help(viewModel.loadedURL?.lastPathComponent ?? "New tab")
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(title)
+        .accessibilityLabel(viewModel.loadedURL?.lastPathComponent ?? title)
         .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : .isButton)
     }
 
     private var title: String {
         guard let url = viewModel.loadedURL else { return "New Tab" }
         return url.deletingPathExtension().lastPathComponent
+    }
+
+    private var fileExtension: String? {
+        guard let ext = viewModel.loadedURL?.pathExtension, !ext.isEmpty else { return nil }
+        return ext.lowercased()
     }
 
     /// What the tab is doing, so you can tell at a glance without switching: playing, separating stems,
