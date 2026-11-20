@@ -972,6 +972,16 @@ struct ContentView: View {
                                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                                         .allowsHitTesting(false)
                                 }
+                            } else if viewModel.isPreparingAudio {
+                                // One-time decode (Opus .m4a and other files Core Audio can't read directly).
+                                ZStack {
+                                    LoadingWaveformView()
+                                    Text("Preparing audio · first open only")
+                                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                        .foregroundColor(.white.opacity(0.6))
+                                        .offset(y: 22)
+                                }
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
                             } else {
                                 Text("Drop an audio or click to open")
                                     .foregroundColor(.secondary)

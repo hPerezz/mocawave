@@ -90,8 +90,17 @@ final class AudioPlayerViewModel: ObservableObject {
     private var playbackTask: Task<Void, Never>?
     private var isScrubbing: Bool = false
     private var currentURL: URL?
-    /// The open file (nil for an empty tab).
-    var loadedURL: URL? { currentURL }
+    /// The open file as the user knows it (nil for an empty tab). For files played from a decoded copy
+    /// (Opus .m4a), this is the original, while `currentURL` is the copy.
+    var loadedURL: URL? { sourceURL ?? currentURL }
+    /// Original file when `currentURL` is a decoded copy (see AudioDecoding).
+    private var sourceURL: URL?
+    /// One-time decode of a file AVAudioFile can't read (shown instead of the waveform).
+    @Published private(set) var isPreparingAudio = false
+    private var prepareTask: Task<Void, Never>?
+
+    /// What the local agents should read: the original file, never the decoded copy in our container.
+    private func agentURL(_ url: URL) -> URL { url == currentURL ? (sourceURL ?? url) : url }
 
     #if MOCA_SNAPSHOT
     /// Headless renders only: pretend a file is open/playing without touching audio.
@@ -209,13 +218,55 @@ final class AudioPlayerViewModel: ObservableObject {
         Self.formatTime(duration)
     }
 
+    /// Opens a file. Files AVAudioFile can't read (Opus in .m4a) are decoded once in the background and
+    /// played from that copy.
     @discardableResult
     func open(url: URL) -> Bool {
-        errorMessage = nil
+        prepareTask?.cancel()
+        isPreparingAudio = false
         guard isSupported(url: url) else {
             errorMessage = "Unsupported file type."
             return false
         }
+        switch AudioDecoding.status(of: url) {
+        case .native:
+            sourceURL = nil
+            return openPlayable(url: url)
+        case .cached(let copy):
+            return openDecodedCopy(copy, of: url)
+        case .needsDecoding(let dest):
+            stopAndReset()
+            sourceURL = url
+            fileName = url.lastPathComponent
+            isPreparingAudio = true
+            addDebugLog("Decoding \(url.lastPathComponent) (not readable by Core Audio directly)")
+            prepareTask = Task { [weak self] in
+                do {
+                    try await AudioDecoding.decode(url, to: dest)
+                    guard let self, !Task.isCancelled, self.sourceURL == url else { return }
+                    self.isPreparingAudio = false
+                    self.openDecodedCopy(dest, of: url)
+                } catch {
+                    guard let self, !Task.isCancelled, self.sourceURL == url else { return }
+                    self.isPreparingAudio = false
+                    self.errorMessage = error.localizedDescription
+                }
+            }
+            return true
+        }
+    }
+
+    @discardableResult
+    private func openDecodedCopy(_ copy: URL, of original: URL) -> Bool {
+        let ok = openPlayable(url: copy)
+        sourceURL = original
+        fileName = original.lastPathComponent
+        return ok
+    }
+
+    @discardableResult
+    private func openPlayable(url: URL) -> Bool {
+        errorMessage = nil
 
         let previousURL = currentURL
         let startedAccessingSecurityScopedResource = url.startAccessingSecurityScopedResource()
@@ -1144,7 +1195,7 @@ final class AudioPlayerViewModel: ObservableObject {
         trackInfoRequestedURL = url
         trackInfo = .queued(position: 0)
         trackInfoTask = Task { [weak self] in
-            let state = await TrackInfoClient.shared.fetch(url) { [weak self] progress in
+            let state = await TrackInfoClient.shared.fetch(self?.agentURL(url) ?? url) { [weak self] progress in
                 await self?.applyTrackInfoProgress(progress, for: url)
             }
             guard let self, !Task.isCancelled, self.currentURL == url else { return }
@@ -1206,7 +1257,7 @@ final class AudioPlayerViewModel: ObservableObject {
                 return
             }
             guard FeatureFlags.trackInfo else { return }
-            let set = await StemClient.shared.existing(url) { [weak self] state in
+            let set = await StemClient.shared.existing(url, agentPath: self?.agentURL(url).path) { [weak self] state in
                 await self?.applyStemsProgress(state, for: url)
             }
             guard let self, !Task.isCancelled, self.currentURL == url else { return }
@@ -1243,7 +1294,7 @@ final class AudioPlayerViewModel: ObservableObject {
         stemsTask?.cancel()
         stemsState = .queued(position: 0)
         stemsTask = Task { [weak self] in
-            let result = await StemClient.shared.separate(url) { [weak self] state in
+            let result = await StemClient.shared.separate(url, agentPath: self?.agentURL(url).path) { [weak self] state in
                 await self?.applyStemsProgress(state, for: url)
             }
             guard let self, !Task.isCancelled, self.currentURL == url else { return }
@@ -1545,6 +1596,7 @@ final class AudioPlayerViewModel: ObservableObject {
         isAnalyzingQuality = false
         resetPlaybackTelemetry()
         currentURL = nil
+        sourceURL = nil
         releaseSecurityScopedResource()
     }
 

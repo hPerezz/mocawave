@@ -34,14 +34,15 @@ actor StemClient {
     }
 
     /// Separates `url` (or finds it cached on the agent), reporting progress, and installs the result.
-    func separate(_ url: URL, model: String = "roformer", store: StemStore = .shared,
+    /// `agentPath`: the file the agent reads when it differs from `url` (decoded copies: the original).
+    func separate(_ url: URL, agentPath: String? = nil, model: String = "roformer", store: StemStore = .shared,
                   progress: @Sendable @escaping (StemsState) async -> Void) async -> Result<StemSet, StemError> {
         var post = URLRequest(url: base.appendingPathComponent("stems"))
         post.httpMethod = "POST"
         post.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        post.httpBody = try? JSONSerialization.data(withJSONObject: ["path": url.path, "model": model])
+        post.httpBody = try? JSONSerialization.data(withJSONObject: ["path": agentPath ?? url.path, "model": model])
         var components = URLComponents(url: base.appendingPathComponent("stems"), resolvingAgainstBaseURL: false)!
-        components.queryItems = [URLQueryItem(name: "path", value: url.path)]
+        components.queryItems = [URLQueryItem(name: "path", value: agentPath ?? url.path)]
         let poll = URLRequest(url: components.url!)
 
         var step = await send(post)
@@ -71,10 +72,10 @@ actor StemClient {
     /// (seeded from dj-stack/stems/out, or separated earlier)? GET only — never enqueues a separation. When it
     /// is ready, downloads and installs it (progress as `.downloading`); otherwise nil and the drawer keeps
     /// offering the button.
-    func existing(_ url: URL, store: StemStore = .shared,
+    func existing(_ url: URL, agentPath: String? = nil, store: StemStore = .shared,
                   progress: @Sendable @escaping (StemsState) async -> Void) async -> StemSet? {
         var components = URLComponents(url: base.appendingPathComponent("stems"), resolvingAgainstBaseURL: false)!
-        components.queryItems = [URLQueryItem(name: "path", value: url.path)]
+        components.queryItems = [URLQueryItem(name: "path", value: agentPath ?? url.path)]
         guard case .ready(let key, let manifest) = await send(URLRequest(url: components.url!)), !Task.isCancelled else {
             return nil
         }
